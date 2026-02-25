@@ -1,2 +1,7 @@
 streamlit
 pandas
+requests
+boto3
+icalendar
+python-dateutil
+streamlit-autorefresh
