@@ -1,13 +1,12 @@
 import re
 import secrets
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 
 import pandas as pd
 import requests
 import streamlit as st
 import boto3
 from botocore.exceptions import ClientError
-
 from icalendar import Calendar
 from streamlit_autorefresh import st_autorefresh
 
@@ -18,30 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 ANCHOR_DATE = date(2025, 7, 1)
 ANCHOR_DAY_NUM = 2
 
-SPECIAL_BLUE_PERIODS = [
-    (date(2025, 7, 7),  date(2025, 8, 3)),
-    (date(2025, 9, 29), date(2025, 10, 26)),
-    (date(2026, 1, 5),  date(2026, 2, 1)),
-    (date(2026, 4, 6),  date(2026, 5, 3)),
-]
-
 FIXED_MD_COLORS = {"yellow", "purple", "blue", "bronze", "green", "orange"}
-
-YPBB = {
-    "1-1": {1: "Early",  2: "Middle", 3: "Late",   4: "Middle"},
-    "1-2": {1: "Middle", 2: "Late",   3: "Middle", 4: "Early"},
-    "2-1": {1: "Late",   2: "Middle", 3: "Early",  4: "Middle"},
-    "2-2": {1: "Middle", 2: "Early",  3: "Middle", 4: "Late"},
-    "3":   {1: "Middle", 2: "Early",  3: "Middle", 4: "Late"},
-}
-
-GREEN = {
-    "1": {1: "Early",  2: "Middle", 3: "Late",   4: "Middle"},
-    "2": {1: "Middle", 2: "Late",   3: "Middle", 4: "Early"},
-    "3": {1: "Late",   2: "Middle", 3: "Early",  4: "Middle"},
-}
-
-MIST_SCU = {1: "Middle", 2: "Early", 3: "Middle", 4: "Late"}
 
 # =====================================================
 # UTILITIES
@@ -66,18 +42,15 @@ def badge(text, color):
 def generate_token():
     return secrets.token_hex(6).upper()
 
-def get_day_number(d):
-    delta = (d - ANCHOR_DATE).days
-    return (delta + ANCHOR_DAY_NUM - 1) % 4 + 1
-
-def is_special_blue(d):
-    return any(start <= d <= end for start, end in SPECIAL_BLUE_PERIODS)
-
 def normalize_title(s):
     if not isinstance(s, str):
         return ""
     s = re.sub(r"[^A-Za-z0-9\s\-]", "", s)
     return re.sub(r"\s+", " ", s).strip()
+
+def get_day_number(d):
+    delta = (d - ANCHOR_DATE).days
+    return (delta + ANCHOR_DAY_NUM - 1) % 4 + 1
 
 def shift_start_end(shift):
     if shift == "Early":
@@ -91,17 +64,13 @@ def shift_start_end(shift):
     return None, None
 
 # =====================================================
-# SHIFT LOGIC
+# SHIFT LOGIC (Simplified Gold/Silver Only — others untouched)
 # =====================================================
 
 def calc_shift(title, d, role):
     t = normalize_title(title).lower()
     if not t:
         return None
-
-    if role == "MD":
-        t = t.replace("gray 1 collaborator", "gray 1 md")
-        t = t.replace("gray 2 collaborator", "gray 2 md")
 
     day = get_day_number(d)
 
@@ -130,7 +99,7 @@ def calc_shift(title, d, role):
         n = int(m.group(1)) if m else 1
         return "Early" if n == 1 else "Middle"
 
-    return None  # All others left untouched
+    return None  # Everything else untouched
 
 # =====================================================
 # S3 FUNCTIONS
@@ -175,6 +144,7 @@ st.title("HMU Shift Processor")
 # Default role = MD
 role = st.selectbox("Role", ["MD", "APP"], index=0)
 
+# Auto refresh hourly
 st_autorefresh(interval=3600 * 1000, key="auto_refresh")
 
 url = st.text_input("Paste ICS Calendar URL")
@@ -182,7 +152,7 @@ url = st.text_input("Paste ICS Calendar URL")
 if st.button("Sync Now") and url:
     st.cache_data.clear()
 
-# Default date window: today → June 30 next calendar year
+# Default date window
 today = date.today()
 default_end = date(today.year + 1, 6, 30)
 
@@ -217,6 +187,7 @@ if url:
 
                 if start_date <= d <= end_date:
                     events.append((title, d, start, end))
+
     except Exception as e:
         st.error(f"Failed to fetch calendar: {e}")
 
@@ -237,6 +208,10 @@ for title, d, original_start, original_end in events:
     else:
         untouched.append((title, d, original_start, original_end))
 
+# =====================================================
+# SUMMARY
+# =====================================================
+
 total_count = len(processed) + len(untouched) + len(rejected)
 
 col1, col2, col3, col4 = st.columns(4)
@@ -250,17 +225,28 @@ filter_option = st.selectbox(
     ["Show All", "Processed Only", "Left Untouched Only", "Errors Only"]
 )
 
-if filter_option in ["Show All", "Processed Only"]:
+def format_table(data, columns):
+    df = pd.DataFrame(data, columns=columns)
+    if not df.empty:
+        df = df.sort_values("Date")
+        df["Date"] = df["Date"].apply(lambda x: x.strftime("%m-%d-%Y"))
+    return df
+
+if filter_option in ["Show All", "Processed Only"] and processed:
     badge("Processed", "#2E8B57")
-    st.write(processed)
+    st.dataframe(format_table(processed, ["Event", "Date", "Start", "End"]), use_container_width=True)
 
-if filter_option in ["Show All", "Left Untouched Only"]:
+if filter_option in ["Show All", "Left Untouched Only"] and untouched:
     badge("Left Untouched", "#F4A300")
-    st.write(untouched)
+    st.dataframe(format_table(untouched, ["Event", "Date", "Start", "End"]), use_container_width=True)
 
-if filter_option in ["Show All", "Errors Only"]:
+if filter_option in ["Show All", "Errors Only"] and rejected:
     badge("Data Errors", "#B22222")
-    st.write(rejected)
+    st.dataframe(pd.DataFrame(rejected, columns=["Event", "Reason"]), use_container_width=True)
+
+# =====================================================
+# FEED PUBLISHING
+# =====================================================
 
 st.subheader("Publish Subscription Feed")
 
@@ -274,14 +260,15 @@ if feed_id and re.match(r"^[a-zA-Z0-9_-]{3,40}$", feed_id):
         st.warning("Feed ID already exists.")
         entered_token = st.text_input("Enter ownership token to update:", type="password")
 
-        if entered_token == existing_token:
-            upload_feed("ICS_PLACEHOLDER", key, existing_token)
-            st.success("Feed updated.")
-        elif entered_token:
-            st.error("Incorrect token.")
+        if entered_token:
+            if entered_token == existing_token:
+                upload_feed("ICS_CONTENT_PLACEHOLDER", key, existing_token)
+                st.success("Feed updated.")
+            else:
+                st.error("Incorrect token.")
     else:
         token = generate_token()
-        upload_feed("ICS_PLACEHOLDER", key, token)
+        upload_feed("ICS_CONTENT_PLACEHOLDER", key, token)
 
         st.success("Feed created.")
         st.write("Save this ownership token:")
