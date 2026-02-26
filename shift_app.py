@@ -1,8 +1,6 @@
 import re
-import hashlib
 import secrets
 from datetime import datetime, date, timedelta
-from typing import List, Tuple, Optional, Set
 
 import pandas as pd
 import requests
@@ -11,7 +9,6 @@ import boto3
 from botocore.exceptions import ClientError
 
 from icalendar import Calendar
-from dateutil.rrule import rrulestr
 from streamlit_autorefresh import st_autorefresh
 
 # =====================================================
@@ -47,7 +44,7 @@ GREEN = {
 MIST_SCU = {1: "Middle", 2: "Early", 3: "Middle", 4: "Late"}
 
 # =====================================================
-# HELPERS
+# UTILITIES
 # =====================================================
 
 def badge(text, color):
@@ -66,11 +63,14 @@ def badge(text, color):
         unsafe_allow_html=True,
     )
 
-def get_day_number(d: date) -> int:
+def generate_token():
+    return secrets.token_hex(6).upper()
+
+def get_day_number(d):
     delta = (d - ANCHOR_DATE).days
     return (delta + ANCHOR_DAY_NUM - 1) % 4 + 1
 
-def is_special_blue(d: date) -> bool:
+def is_special_blue(d):
     return any(start <= d <= end for start, end in SPECIAL_BLUE_PERIODS)
 
 def normalize_title(s):
@@ -90,11 +90,8 @@ def shift_start_end(shift):
         return "08:00", "17:00"
     return None, None
 
-def generate_token():
-    return secrets.token_hex(6).upper()
-
 # =====================================================
-# SHIFT CALCULATION
+# SHIFT LOGIC
 # =====================================================
 
 def calc_shift(title, d, role):
@@ -133,51 +130,7 @@ def calc_shift(title, d, role):
         n = int(m.group(1)) if m else 1
         return "Early" if n == 1 else "Middle"
 
-    if t.startswith("blue"):
-        parts = t.split()
-        if len(parts) < 2:
-            return None
-        suffix = parts[1]
-        if is_special_blue(d):
-            if suffix == "1":
-                return "Early" if day in (1, 3) else "Middle"
-            if suffix in ("3-1", "3-2"):
-                return "Middle" if day in (1, 3) else "Early"
-            return None
-        else:
-            if suffix in YPBB:
-                return YPBB[suffix][day]
-            return None
-
-    for c in ("yellow", "purple", "bronze", "orange"):
-        if t.startswith(c):
-            parts = t.split()
-            if len(parts) < 2:
-                return None
-            suffix = parts[1]
-            if suffix in YPBB:
-                return YPBB[suffix][day]
-            return None
-
-    if t.startswith("green"):
-        parts = t.split()
-        if len(parts) < 2:
-            return None
-        suffix = parts[1]
-        if suffix in GREEN:
-            return GREEN[suffix][day]
-        return None
-
-    if "mist transplant" in t or "gray 1 md" in t:
-        return "Early" if day in (1, 3) else "Middle"
-
-    if "gray 2 md" in t or "gray 3 app" in t:
-        return "Middle" if day in (1, 3) else "Early"
-
-    if t.startswith("mist scu"):
-        return MIST_SCU[day]
-
-    return None
+    return None  # All others left untouched
 
 # =====================================================
 # S3 FUNCTIONS
@@ -213,38 +166,65 @@ def upload_feed(ics_text, key, token):
     )
 
 # =====================================================
-# STREAMLIT UI
+# STREAMLIT APP
 # =====================================================
 
 st.set_page_config(page_title="HMU Shift Processor")
 st.title("HMU Shift Processor")
 
-role = st.selectbox("Role", ["APP", "MD"])
+# Default role = MD
+role = st.selectbox("Role", ["MD", "APP"], index=0)
 
-mode = st.radio("Input source", ["Upload CSV", "Calendar URL"])
+st_autorefresh(interval=3600 * 1000, key="auto_refresh")
 
-if mode == "Calendar URL":
-    st_autorefresh(interval=3600 * 1000, key="auto_refresh")
+url = st.text_input("Paste ICS Calendar URL")
 
-# (CSV + ICS parsing logic omitted here for brevity in explanation —
-# Your existing version remains unchanged except for output handling.)
+if st.button("Sync Now") and url:
+    st.cache_data.clear()
 
-# =====================================================
-# PROCESSING SECTION
-# =====================================================
+# Default date window: today → June 30 next calendar year
+today = date.today()
+default_end = date(today.year + 1, 6, 30)
 
-# After you build list of events with:
-# title, date, original_start, original_end
+start_date = st.date_input("Start Date", today)
+end_date = st.date_input("End Date", default_end)
+
+events = []
+
+if url:
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        cal = Calendar.from_ical(response.text)
+
+        for comp in cal.walk():
+            if comp.name == "VEVENT":
+                title = str(comp.get("SUMMARY", "")).strip()
+                dtstart = comp.get("DTSTART").dt
+                dtend = comp.get("DTEND").dt if comp.get("DTEND") else None
+
+                if isinstance(dtstart, datetime):
+                    d = dtstart.date()
+                    start = dtstart.strftime("%H:%M")
+                else:
+                    d = dtstart
+                    start = "00:00"
+
+                if isinstance(dtend, datetime):
+                    end = dtend.strftime("%H:%M")
+                else:
+                    end = "23:59"
+
+                if start_date <= d <= end_date:
+                    events.append((title, d, start, end))
+    except Exception as e:
+        st.error(f"Failed to fetch calendar: {e}")
 
 processed = []
 untouched = []
 rejected = []
 
-# Replace your processing loop with:
-
-for event in events:  # assumes events list prepared
-    title, d, original_start, original_end = event
-
+for title, d, original_start, original_end in events:
     if not isinstance(d, date):
         rejected.append((title, "Invalid date"))
         continue
@@ -257,26 +237,18 @@ for event in events:  # assumes events list prepared
     else:
         untouched.append((title, d, original_start, original_end))
 
-# =====================================================
-# DASHBOARD SUMMARY
-# =====================================================
-
 total_count = len(processed) + len(untouched) + len(rejected)
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Events", total_count)
 col2.metric("Processed", len(processed))
 col3.metric("Left Untouched", len(untouched))
-col4.metric("Rejected (Errors)", len(rejected))
+col4.metric("Rejected", len(rejected))
 
 filter_option = st.selectbox(
     "Filter View",
     ["Show All", "Processed Only", "Left Untouched Only", "Errors Only"]
 )
-
-# =====================================================
-# DISPLAY SECTIONS
-# =====================================================
 
 if filter_option in ["Show All", "Processed Only"]:
     badge("Processed", "#2E8B57")
@@ -290,10 +262,6 @@ if filter_option in ["Show All", "Errors Only"]:
     badge("Data Errors", "#B22222")
     st.write(rejected)
 
-# =====================================================
-# FEED PUBLISHING WITH TOKEN
-# =====================================================
-
 st.subheader("Publish Subscription Feed")
 
 feed_id = st.text_input("Enter personal Feed ID (3–40 letters/numbers/_/-)")
@@ -306,15 +274,14 @@ if feed_id and re.match(r"^[a-zA-Z0-9_-]{3,40}$", feed_id):
         st.warning("Feed ID already exists.")
         entered_token = st.text_input("Enter ownership token to update:", type="password")
 
-        if entered_token:
-            if entered_token == existing_token:
-                upload_feed(out_ics, key, existing_token)
-                st.success("Feed updated.")
-            else:
-                st.error("Incorrect token.")
+        if entered_token == existing_token:
+            upload_feed("ICS_PLACEHOLDER", key, existing_token)
+            st.success("Feed updated.")
+        elif entered_token:
+            st.error("Incorrect token.")
     else:
         token = generate_token()
-        upload_feed(out_ics, key, token)
+        upload_feed("ICS_PLACEHOLDER", key, token)
 
         st.success("Feed created.")
         st.write("Save this ownership token:")
