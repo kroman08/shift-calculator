@@ -422,16 +422,18 @@ def stable_uid(feed_id: str, title: str, start_dt: Any) -> str:
     raw = f"{feed_id}|{title}|{start_dt}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:20] + "@hmu-shifts"
 
-def build_output_ics(processed_rows: List[Dict[str, Any]],
-                     untouched_rows: List[Dict[str, Any]],
-                     feed_id_for_uid: str) -> bytes:
+def build_output_ics(processed_rows, untouched_rows, feed_id_for_uid):
     cal = Calendar()
     cal.add("prodid", "-//HMU Shift Processor//EN")
     cal.add("version", "2.0")
     cal.add("calscale", "GREGORIAN")
     cal.add("X-WR-TIMEZONE", "America/New_York")
 
-    def add_row(row: Dict[str, Any]) -> None:
+    # ✅ Add timestamp to calendar name
+    timestamp_str = datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M")
+    cal.add("X-WR-CALNAME", f"HMU Shifts (Updated {timestamp_str})")
+
+    def add_row(row):
         title = row["title"]
         uid = row.get("uid") or stable_uid(feed_id_for_uid, title, row["start_dt"])
 
@@ -441,15 +443,16 @@ def build_output_ics(processed_rows: List[Dict[str, Any]],
         ev.add("dtstamp", datetime.now(APP_TZ))
 
         if row["all_day"]:
-            ev.add("dtstart", row["start_dt"])  # date
+            ev.add("dtstart", row["start_dt"])
         else:
-            # Ensure Eastern tz is present
             sd = row["start_dt"]
             ed = row["end_dt"]
+
             if isinstance(sd, datetime):
-                sd = _as_eastern(sd)
+                sd = sd.astimezone(APP_TZ)
             if isinstance(ed, datetime):
-                ed = _as_eastern(ed)
+                ed = ed.astimezone(APP_TZ)
+
             ev.add("dtstart", sd)
             ev.add("dtend", ed)
 
@@ -457,11 +460,11 @@ def build_output_ics(processed_rows: List[Dict[str, Any]],
 
     for r in processed_rows:
         add_row(r)
+
     for r in untouched_rows:
         add_row(r)
 
     return cal.to_ical()
-
 # =====================================================
 # S3 PUBLISH (token ownership)
 # =====================================================
@@ -663,6 +666,9 @@ st.download_button(
 # ---------------------------
 # Publish subscription feed (S3)
 # ---------------------------
+# ---------------------------
+# Publish subscription feed (S3)
+# ---------------------------
 st.subheader("Publish Subscription Feed (S3)")
 
 st.markdown(
@@ -673,7 +679,7 @@ st.markdown(
     "and inadvertently overwriting the others' calendars."
 )
 
-# Show warning only after URL is provided (and only in URL mode)
+# Show warning only after URL provided (and only URL mode)
 if input_mode == "Subscription URL" and url:
     st.warning(
         "Important: The subscription URL does NOT automatically update in the background. "
@@ -685,36 +691,39 @@ if input_mode == "Subscription URL" and url:
 feed_id = st.text_input("Feed ID (3–40 letters/numbers/_/-)")
 valid_id = bool(re.match(r"^[A-Za-z0-9_-]{3,40}$", feed_id or ""))
 
-publish_clicked = st.button("Publish / Update feed", disabled=not valid_id)
-
-if publish_clicked and valid_id:
+if valid_id:
     bucket = st.secrets["S3_BUCKET"]
     region = st.secrets["AWS_REGION"]
     key = f"feeds/{feed_id}.ics"
+    sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
 
     existing_token = get_existing_token(bucket, key)
 
     if existing_token:
-        st.warning("This Feed ID already exists.")
-        entered = st.text_input("Enter ownership token to update this feed", type="password")
-        if not entered:
-            st.stop()
-
-        if entered != existing_token:
-            st.error("Incorrect ownership token. Cannot overwrite this feed.")
-        else:
-            upload_feed(bucket, key, output_ics_bytes, existing_token)
-            st.success(f"Feed updated. Last published: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-            st.write("Subscription URL:")
-            st.code(sub_url)
+        st.info("This Feed ID already exists.")
+        entered_token = st.text_input("Enter ownership token to update:", type="password")
+        if st.button("Update Feed"):
+            if not entered_token:
+                st.error("You must enter the ownership token.")
+            elif entered_token != existing_token:
+                st.error("Incorrect ownership token. Update failed.")
+            else:
+                try:
+                    upload_feed(bucket, key, output_ics_bytes, existing_token)
+                    st.success("Feed successfully updated.")
+                    st.code(sub_url)
+                except Exception as e:
+                    st.error(f"Update failed: {e}")
 
     else:
-        token = generate_token()
-        upload_feed(bucket, key, output_ics_bytes, token)
-        st.success(f"Feed created. Last published: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-        st.write("Subscription URL:")
-        st.code(sub_url)
-        st.error("IMPORTANT: Save this ownership token. You will need it to update this feed later.")
-        st.code(token)
+        if st.button("Create Feed"):
+            try:
+                token = generate_token()
+                upload_feed(bucket, key, output_ics_bytes, token)
+                st.success("Feed successfully created.")
+                st.write("Subscription URL:")
+                st.code(sub_url)
+                st.warning("Save this ownership token. You will need it to update this feed later.")
+                st.code(token)
+            except Exception as e:
+                st.error(f"Creation failed: {e}")
