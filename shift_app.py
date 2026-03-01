@@ -429,10 +429,35 @@ def build_output_ics(processed_rows, untouched_rows, feed_id_for_uid):
     cal.add("calscale", "GREGORIAN")
     cal.add("X-WR-TIMEZONE", "America/New_York")
 
-    # ✅ Add timestamp to calendar name
-    timestamp_str = datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M")
-    cal.add("X-WR-CALNAME", f"HMU Shifts (Updated {timestamp_str})")
+# Add subtle "Last Updated" marker event
+updated_now = datetime.now(APP_TZ)
 
+meta_event = Event()
+meta_event.add(
+    "summary",
+    f"HMU Shifts — Last Updated: {updated_now.strftime('%Y-%m-%d %H:%M')}"
+)
+meta_event.add("uid", f"hmushifts-last-updated@{feed_id_for_uid}")
+meta_event.add("dtstamp", updated_now)
+
+# 1-minute event at 12:01 AM on publish day
+start_marker = datetime.combine(
+    updated_now.date(),
+    time(0, 1)
+).replace(tzinfo=APP_TZ)
+
+end_marker = start_marker + timedelta(minutes=1)
+
+meta_event.add("dtstart", start_marker)
+meta_event.add("dtend", end_marker)
+
+# Transparent so it does not block the calendar visually
+meta_event.add("transp", "TRANSPARENT")
+meta_event.add("description", "System-generated update marker. Safe to ignore.")
+
+cal.add_component(meta_event)
+
+    
     def add_row(row):
         title = row["title"]
         uid = row.get("uid") or stable_uid(feed_id_for_uid, title, row["start_dt"])
