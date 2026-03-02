@@ -497,7 +497,34 @@ def get_existing_token(bucket: str, key: str) -> Optional[str]:
     except ClientError:
         return None
 
-def upload_feed(bucket: str, key: str, ics_bytes: bytes, token: str) -> None:
+
+def get_existing_metadata(bucket: str, key: str) -> Dict[str, str]:
+    """Return the metadata for an existing object, or empty dict."""
+    try:
+        resp = s3_client().head_object(Bucket=bucket, Key=key)
+        return resp.get("Metadata", {})
+    except ClientError:
+        return {}
+
+
+def upload_feed(
+    bucket: str,
+    key: str,
+    ics_bytes: bytes,
+    token: str,
+    metadata: Optional[Dict[str, str]] = None,
+) -> None:
+    """Upload an ICS payload to S3, recording the owner-token and any extra metadata.
+
+    ``metadata`` may include fields such as ``source-url`` or ``role``.  The
+    owner-token will always be stored and will overwrite any existing value in
+    ``metadata``.
+    """
+    if metadata is None:
+        metadata = {}
+    # ensure the token is always present
+    metadata["owner-token"] = token
+
     try:
         s3_client().put_object(
             Bucket=bucket,
@@ -505,7 +532,7 @@ def upload_feed(bucket: str, key: str, ics_bytes: bytes, token: str) -> None:
             Body=ics_bytes,
             ContentType="text/calendar; charset=utf-8",
             CacheControl="no-cache, max-age=0",
-            Metadata={"owner-token": token},
+            Metadata=metadata,
         )
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "UnknownError")
@@ -529,6 +556,39 @@ role = st.selectbox("Role", ["MD", "APP"], index=0)
 # Auto-refresh hourly (only while app open)
 st_autorefresh(interval=3600 * 1000, key="auto_refresh_hourly")
 
+# ------------------------------------------------------------------
+# always-visible feed ID / ownership token section
+# ------------------------------------------------------------------
+st.subheader("Publish Subscription Feed (S3)")
+
+st.markdown(
+    "You can publish a subscription URL (paste into Outlook once). "
+    "A token is needed if you later republish/update the calendar subscription URL "
+    "associated with this Feed ID. "
+    "This is intended to prevent multiple people from using the same Feed ID "
+    "and inadvertently overwriting the others' calendars."
+)
+
+feed_id = st.text_input("Feed ID (3–40 letters/numbers/_/-)", key="feed_id")
+st.caption("*Forgot your Feed ID? Open your calendar app, find the subscribed calendar, go to info, and look in the URL: .../feeds/yourFeedID.ics*")
+token = st.text_input("Ownership Token (for updates)", type="password", key="token")
+st.caption("*Ownership token format: First initial + Middle initial + Last initial + Birth month (MM). Example: JMS01*")
+
+valid_id = bool(re.match(r"^[A-Za-z0-9_-]{3,40}$", feed_id or ""))
+existing_meta: Dict[str, str] = {}
+existing_token = None
+existing_url = None
+if valid_id:
+    bucket = st.secrets["S3_BUCKET"]
+    region = st.secrets["AWS_REGION"]
+    key = f"feeds/{feed_id}.ics"
+    existing_meta = get_existing_metadata(bucket, key)
+    existing_token = existing_meta.get("owner-token")
+    existing_url = existing_meta.get("source-url")
+    if existing_url:
+        st.caption(f"*Previously used subscription URL: {existing_url}*")
+
+# choose input method after we may have an existing URL
 input_mode = st.radio("Input method", ["Subscription URL", "Upload ICS file"], horizontal=True)
 
 # Default window: today -> June 30 next calendar year
@@ -547,7 +607,7 @@ last_sync: Optional[str] = None
 url: Optional[str] = None
 
 if input_mode == "Subscription URL":
-    url = st.text_input("Paste ICS subscription URL (.ics)")
+    url = st.text_input("Paste ICS subscription URL (.ics)", value=(existing_url or ""))
     colA, colB = st.columns([1, 1])
     with colA:
         sync_now = st.button("Sync Now", disabled=not bool(url))
@@ -686,15 +746,6 @@ st.download_button(
 # ---------------------------
 # Publish subscription feed (S3) with token ownership
 # ---------------------------
-st.subheader("Publish Subscription Feed (S3)")
-
-st.markdown(
-    "You can publish a subscription URL (paste into Outlook once). "
-    "A token is needed if you later republish/update the calendar subscription URL "
-    "associated with this Feed ID. "
-    "This is intended to prevent multiple people from using the same Feed ID "
-    "and inadvertently overwriting the others' calendars."
-)
 
 # Warning only after URL is provided (and only in URL mode)
 if input_mode == "Subscription URL" and url:
@@ -705,30 +756,39 @@ if input_mode == "Subscription URL" and url:
         "Otherwise, the subscription calendar will remain unchanged."
     )
 
-feed_id = st.text_input("Feed ID (3–40 letters/numbers/_/-)")
-st.caption("*Forgot your Feed ID? Open your calendar app, find the subscribed calendar, go to info, and look in the URL: .../feeds/yourFeedID.ics*")
-
-valid_id = bool(re.match(r"^[A-Za-z0-9_-]{3,40}$", feed_id or ""))
-
 if valid_id:
     bucket = st.secrets["S3_BUCKET"]
     region = st.secrets["AWS_REGION"]
     key = f"feeds/{feed_id}.ics"
     sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-    existing_token = get_existing_token(bucket, key)
+
+    if existing_url:
+        st.caption(f"*Previously used subscription URL: {existing_url}*")
 
     if existing_token:
         st.info("This Feed ID already exists.")
-        st.caption("*Your ownership token is your personal identifier: First initial + Middle initial + Last initial + Birth month (MM). Example: JMS01*")
-        entered_token = st.text_input("Enter your ownership token to update:", type="password")
+        # token input is already visible above
         if st.button("Update Feed"):
-            if not entered_token:
+            if not token:
                 st.error("You must enter your ownership token.")
-            elif entered_token != existing_token:
+            elif token != existing_token:
                 st.error("Incorrect ownership token. Update failed.")
             else:
                 try:
-                    upload_feed(bucket, key, output_ics_bytes, existing_token)
+                    if input_mode == "Subscription URL" and not url and existing_url:
+                        url = existing_url
+
+                    upload_feed(
+                        bucket,
+                        key,
+                        output_ics_bytes,
+                        existing_token,
+                        metadata={
+                            **({"source-url": url} if url else {}),
+                            "role": role,
+                            "window-end": str(window_end),
+                        },
+                    )
                     st.success("Feed successfully updated.")
                     st.write("Subscription URL:")
                     st.code(sub_url)
@@ -743,21 +803,27 @@ if valid_id:
                 except Exception as e:
                     st.error(f"Update failed: {e}")
     else:
-        st.caption("*Your ownership token is your personal identifier: First initial + Middle initial + Last initial + Birth month (MM). Example: JMS01*")
-        new_token = st.text_input("Create your ownership token:", type="password", help="Use format: initials + birth month (MM)")
         if st.button("Create Feed"):
-            if not new_token:
+            if not token:
                 st.error("You must enter an ownership token.")
             else:
                 try:
-                    upload_feed(bucket, key, output_ics_bytes, new_token)
+                    upload_feed(
+                        bucket,
+                        key,
+                        output_ics_bytes,
+                        token,
+                        metadata={
+                            **({"source-url": url} if url else {}),
+                            "role": role,
+                            "window-end": str(window_end),
+                        },
+                    )
                     st.success("Feed successfully created.")
                     st.write("Subscription URL:")
                     st.code(sub_url)
                     st.success("Save your ownership token. You will need it to update this feed later.")
-                    st.code(new_token)
+                    st.code(token)
                 except Exception as e:
                     st.error(f"Creation failed: {e}")
-else:
-    if feed_id:
-        st.error("Invalid Feed ID. Use 3–40 characters: letters, numbers, underscore, or dash.")
+            st.error("Invalid Feed ID. Use 3–40 characters: letters, numbers, underscore, or dash.")
