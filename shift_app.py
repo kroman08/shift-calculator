@@ -233,11 +233,11 @@ else:
 
 st.subheader("Publish Subscription Feed")
 
-st.caption("*Ownership token format: First initial + Middle initial + Last initial + Birth month (MM). Example: JMS01*")
+feed_id = st.text_input("Feed ID", key="feed_id")
 st.caption("*Forgot Feed ID? In your calendar app, open the subscribed calendar info. URL shows .../feeds/yourFeedID.ics*")
 
-feed_id = st.text_input("Feed ID", key="feed_id")
 token = st.text_input("Ownership Token", type="password", key="token")
+st.caption("*Ownership token format: First initial + Middle initial + Last initial + Birth month (MM). Example: JMS01*")
 
 bucket = st.secrets["S3_BUCKET"]
 region = st.secrets["AWS_REGION"]
