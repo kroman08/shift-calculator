@@ -458,29 +458,29 @@ meta_event.add("description", "System-generated update marker. Safe to ignore.")
 cal.add_component(meta_event)
     
 def add_row(row):
-        title = row["title"]
-        uid = row.get("uid") or stable_uid(feed_id_for_uid, title, row["start_dt"])
+    title = row["title"]
+    uid = row.get("uid") or stable_uid(feed_id_for_uid, title, row["start_dt"])
 
-        ev = Event()
-        ev.add("summary", title)
-        ev.add("uid", uid)
-        ev.add("dtstamp", datetime.now(APP_TZ))
+    ev = Event()
+    ev.add("summary", title)
+    ev.add("uid", uid)
+    ev.add("dtstamp", datetime.now(APP_TZ))
 
-        if row["all_day"]:
-            ev.add("dtstart", row["start_dt"])
-        else:
-            sd = row["start_dt"]
-            ed = row["end_dt"]
+    if row["all_day"]:
+        ev.add("dtstart", row["start_dt"])
+    else:
+        sd = row["start_dt"]
+        ed = row["end_dt"]
 
-            if isinstance(sd, datetime):
-                sd = sd.astimezone(APP_TZ)
-            if isinstance(ed, datetime):
-                ed = ed.astimezone(APP_TZ)
+        if isinstance(sd, datetime):
+            sd = sd.astimezone(APP_TZ)
+        if isinstance(ed, datetime):
+            ed = ed.astimezone(APP_TZ)
 
-            ev.add("dtstart", sd)
-            ev.add("dtend", ed)
+        ev.add("dtstart", sd)
+        ev.add("dtend", ed)
 
-        cal.add_component(ev)
+    cal.add_component(ev)
 
     for r in processed_rows:
         add_row(r)
