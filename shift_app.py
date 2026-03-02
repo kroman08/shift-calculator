@@ -1,5 +1,5 @@
 # ============================================================
-# HMU SHIFT PROCESSOR – FINAL CONSOLIDATED VERSION
+# HMU SHIFT PROCESSOR – FINAL VERSION
 # ============================================================
 
 import re
@@ -26,7 +26,7 @@ def s3_client():
     )
 
 # ============================================================
-# SHIFT RULES (UNCHANGED CORE LOGIC)
+# SHIFT RULES
 # ============================================================
 
 ANCHOR_DATE = date(2025, 7, 1)
@@ -52,7 +52,6 @@ def calc_shift_type(title, d, role):
     t = normalize_title(title).lower()
     day_num = get_day_number(d)
 
-    # GOLD
     if t.startswith("gold"):
         parts = t.split()
         if len(parts) >= 2 and parts[1].isdigit():
@@ -65,9 +64,7 @@ def calc_shift_type(title, d, role):
                 return "Early" if day_num in [1,3] else "Middle"
             if n in [2,4]:
                 return "Middle" if day_num in [1,3] else "Early"
-        return None
 
-    # SILVER
     if t.startswith("silver"):
         parts = t.split()
         if len(parts) == 1:
@@ -75,7 +72,7 @@ def calc_shift_type(title, d, role):
         if len(parts) >= 2 and parts[1].isdigit():
             return "Early" if int(parts[1]) == 1 else "Middle"
 
-    return None  # other shifts left untouched
+    return None
 
 # ============================================================
 # BUILD ICS
@@ -89,7 +86,7 @@ def build_output_ics(processed, untouched, feed_id):
 
     updated_now = datetime.now(APP_TZ)
 
-    # ---- Last Updated Marker (1 min, 12:01 AM) ----
+    # --- Last Updated Marker ---
     meta_event = Event()
     meta_event.add(
         "summary",
@@ -128,9 +125,9 @@ def build_output_ics(processed, untouched, feed_id):
 st.set_page_config(page_title="HMU Shift Processor")
 st.title("HMU Shift Processor")
 
-# -------------------------------
-# Returning User Notice
-# -------------------------------
+# ============================================================
+# RESTORE SECTION
+# ============================================================
 
 st.info(
     "Returning users: If you previously created a subscription feed, "
@@ -139,8 +136,13 @@ st.info(
 
 st.markdown("### Restore Existing Feed Settings")
 
-restore_feed = st.text_input("Feed ID")
-restore_token = st.text_input("Ownership Token", type="password")
+restore_feed = st.text_input("Feed ID", key="restore_feed_id")
+restore_token = st.text_input("Ownership Token", type="password", key="restore_token")
+
+st.caption(
+    "*Ownership token format: First initial + Middle initial + Last initial "
+    "+ Birth month (MM). Example: JMS01*"
+)
 
 st.caption(
     "*Forgot your Feed ID? In your calendar app, open subscribed calendar settings. "
@@ -165,14 +167,18 @@ if st.button("Restore Saved Settings"):
                 metadata.get("window-end")
             ) if metadata.get("window-end") else None
 
+            # 🔥 AUTO-FILL PUBLISH FIELDS
+            st.session_state["publish_feed_id"] = restore_feed
+            st.session_state["publish_token"] = restore_token
+
             st.success("Settings restored. Review and click Publish to update.")
 
     except Exception:
         st.error("Feed ID not found.")
 
-# -------------------------------
-# Role + Date Range
-# -------------------------------
+# ============================================================
+# ROLE + DATE
+# ============================================================
 
 role = st.selectbox(
     "Role",
@@ -190,9 +196,9 @@ window_end = st.date_input(
     )
 )
 
-# -------------------------------
-# Input Source
-# -------------------------------
+# ============================================================
+# INPUT SOURCE
+# ============================================================
 
 input_mode = st.radio("Input Method", ["Subscription URL","Upload ICS"])
 
@@ -202,7 +208,8 @@ url = None
 if input_mode == "Subscription URL":
     url = st.text_input(
         "ICS Subscription URL",
-        value=st.session_state.get("source_url","")
+        value=st.session_state.get("source_url",""),
+        key="source_url_input"
     )
     if url:
         try:
@@ -211,14 +218,13 @@ if input_mode == "Subscription URL":
             cal_text = r.text
         except Exception as e:
             st.error(f"Unable to fetch calendar: {e}")
-
 else:
     upload = st.file_uploader("Upload ICS file", type=["ics"])
     if upload:
         cal_text = upload.read().decode("utf-8")
 
 # ============================================================
-# PROCESS
+# PROCESS EVENTS
 # ============================================================
 
 processed = []
@@ -261,7 +267,7 @@ if cal_text:
     st.success(f"{len(processed)} processed | {len(untouched)} untouched")
 
 # ============================================================
-# DOWNLOAD OUTPUT
+# DOWNLOAD
 # ============================================================
 
 if processed or untouched:
@@ -280,8 +286,15 @@ if processed or untouched:
 
 st.markdown("## Publish Subscription Feed")
 
-feed_id = st.text_input("Feed ID")
-token = st.text_input("Ownership Token")
+feed_id = st.text_input(
+    "Feed ID",
+    key="publish_feed_id"
+)
+
+token = st.text_input(
+    "Ownership Token",
+    key="publish_token"
+)
 
 if st.button("Publish Feed"):
     if not feed_id or not token:
