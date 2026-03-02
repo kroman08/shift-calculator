@@ -456,7 +456,6 @@ meta_event.add("transp", "TRANSPARENT")
 meta_event.add("description", "System-generated update marker. Safe to ignore.")
 
 cal.add_component(meta_event)
-
     
     def add_row(row):
         title = row["title"]
