@@ -1,7 +1,6 @@
 import re
 import secrets
 import hashlib
-import json
 from datetime import datetime, date, time, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -243,8 +242,7 @@ def _clamp_same_day(start_dt: datetime, end_dt: datetime) -> datetime:
     """
     if end_dt.date() != start_dt.date():
         end_dt = datetime.combine(start_dt.date(), end_dt.timetz())
-        if start_dt.tzinfo is not None:
-            end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
+        end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
     if end_dt <= start_dt:
         end_dt = start_dt + timedelta(hours=1)
     return end_dt
@@ -351,7 +349,6 @@ def expand_events(cal_text: str, window_start: date, window_end: date) -> Tuple[
                 continue
 
             duration = dtend - dtstart
-
             ws = datetime.combine(window_start, time.min).replace(tzinfo=APP_TZ)
             we = datetime.combine(window_end, time.max).replace(tzinfo=APP_TZ)
 
@@ -416,79 +413,72 @@ def expand_events(cal_text: str, window_start: date, window_end: date) -> Tuple[
     return uniq, errors
 
 # =====================================================
-# OUTPUT ICS BUILD (Eastern)
+# OUTPUT ICS BUILD (Eastern) + Last Updated marker
 # =====================================================
 def stable_uid(feed_id: str, title: str, start_dt: Any) -> str:
     raw = f"{feed_id}|{title}|{start_dt}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:20] + "@hmu-shifts"
 
-def build_output_ics(processed_rows, untouched_rows, feed_id_for_uid):
+def build_output_ics(
+    processed_rows: List[Dict[str, Any]],
+    untouched_rows: List[Dict[str, Any]],
+    feed_id_for_uid: str
+) -> bytes:
     cal = Calendar()
     cal.add("prodid", "-//HMU Shift Processor//EN")
     cal.add("version", "2.0")
     cal.add("calscale", "GREGORIAN")
     cal.add("X-WR-TIMEZONE", "America/New_York")
 
-# Add subtle "Last Updated" marker event
-updated_now = datetime.now(APP_TZ)
+    # ---- Last Updated marker: 1-minute transparent event @ 12:01 AM on publish day
+    updated_now = datetime.now(APP_TZ)
 
-meta_event = Event()
-meta_event.add(
-    "summary",
-    f"HMU Shifts — Last Updated: {updated_now.strftime('%Y-%m-%d %H:%M')}"
-)
-meta_event.add("uid", f"hmushifts-last-updated@{feed_id_for_uid}")
-meta_event.add("dtstamp", updated_now)
+    meta_event = Event()
+    meta_event.add("summary", f"HMU Shifts — Last Updated: {updated_now.strftime('%Y-%m-%d %H:%M')}")
+    meta_event.add("uid", f"hmushifts-last-updated@{feed_id_for_uid}")
+    meta_event.add("dtstamp", updated_now)
 
-# 1-minute event at 12:01 AM on publish day
-start_marker = datetime.combine(
-    updated_now.date(),
-    time(0, 1)
-).replace(tzinfo=APP_TZ)
+    start_marker = datetime.combine(updated_now.date(), time(0, 1)).replace(tzinfo=APP_TZ)
+    end_marker = start_marker + timedelta(minutes=1)
 
-end_marker = start_marker + timedelta(minutes=1)
+    meta_event.add("dtstart", start_marker)
+    meta_event.add("dtend", end_marker)
+    meta_event.add("transp", "TRANSPARENT")
+    meta_event.add("description", "System-generated update marker. Safe to ignore.")
 
-meta_event.add("dtstart", start_marker)
-meta_event.add("dtend", end_marker)
+    cal.add_component(meta_event)
+    # ---- end marker
 
-# Transparent so it does not block the calendar visually
-meta_event.add("transp", "TRANSPARENT")
-meta_event.add("description", "System-generated update marker. Safe to ignore.")
+    def add_row(row: Dict[str, Any]) -> None:
+        title = row["title"]
+        uid = row.get("uid") or stable_uid(feed_id_for_uid, title, row["start_dt"])
 
-cal.add_component(meta_event)
-    
-def add_row(row):
-    title = row["title"]
-    uid = row.get("uid") or stable_uid(feed_id_for_uid, title, row["start_dt"])
+        ev = Event()
+        ev.add("summary", title)
+        ev.add("uid", uid)
+        ev.add("dtstamp", datetime.now(APP_TZ))
 
-    ev = Event()
-    ev.add("summary", title)
-    ev.add("uid", uid)
-    ev.add("dtstamp", datetime.now(APP_TZ))
+        if row["all_day"]:
+            ev.add("dtstart", row["start_dt"])  # date
+        else:
+            sd = row["start_dt"]
+            ed = row["end_dt"]
+            if isinstance(sd, datetime):
+                sd = _as_eastern(sd)
+            if isinstance(ed, datetime):
+                ed = _as_eastern(ed)
+            ev.add("dtstart", sd)
+            ev.add("dtend", ed)
 
-    if row["all_day"]:
-        ev.add("dtstart", row["start_dt"])
-    else:
-        sd = row["start_dt"]
-        ed = row["end_dt"]
-
-        if isinstance(sd, datetime):
-            sd = sd.astimezone(APP_TZ)
-        if isinstance(ed, datetime):
-            ed = ed.astimezone(APP_TZ)
-
-        ev.add("dtstart", sd)
-        ev.add("dtend", ed)
-
-    cal.add_component(ev)
+        cal.add_component(ev)
 
     for r in processed_rows:
         add_row(r)
-
     for r in untouched_rows:
         add_row(r)
 
     return cal.to_ical()
+
 # =====================================================
 # S3 PUBLISH (token ownership)
 # =====================================================
@@ -508,14 +498,21 @@ def get_existing_token(bucket: str, key: str) -> Optional[str]:
         return None
 
 def upload_feed(bucket: str, key: str, ics_bytes: bytes, token: str) -> None:
-    s3_client().put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=ics_bytes,
-        ContentType="text/calendar; charset=utf-8",
-        CacheControl="no-cache, max-age=0",
-        Metadata={"owner-token": token},
-    )
+    try:
+        s3_client().put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=ics_bytes,
+            ContentType="text/calendar; charset=utf-8",
+            CacheControl="no-cache, max-age=0",
+            Metadata={"owner-token": token},
+        )
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "UnknownError")
+        msg = e.response.get("Error", {}).get("Message", str(e))
+        st.error(f"S3 upload failed: {code}")
+        st.error(msg)
+        raise
 
 def generate_token() -> str:
     return secrets.token_hex(6).upper()
@@ -529,7 +526,7 @@ st.title("HMU Shift Processor")
 # Default role = MD
 role = st.selectbox("Role", ["MD", "APP"], index=0)
 
-# Auto-refresh hourly (only while app is open)
+# Auto-refresh hourly (only while app open)
 st_autorefresh(interval=3600 * 1000, key="auto_refresh_hourly")
 
 input_mode = st.radio("Input method", ["Subscription URL", "Upload ICS file"], horizontal=True)
@@ -547,7 +544,6 @@ if window_end < window_start:
 
 cal_text: Optional[str] = None
 last_sync: Optional[str] = None
-
 url: Optional[str] = None
 
 if input_mode == "Subscription URL":
@@ -593,8 +589,8 @@ rejected_rows: List[Tuple[str, str]] = list(data_errors)
 
 for e in events:
     title = e["title"]
+
     if e["all_day"]:
-        # Leave all-day untouched
         untouched_rows.append(e)
         continue
 
@@ -627,7 +623,7 @@ for e in events:
 # ---------------------------
 # Display (sorted, formatted MM-DD-YYYY)
 # ---------------------------
-def to_display_df_processed_or_untouched(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+def to_display_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
     disp = []
     for r in rows:
         if r.get("all_day"):
@@ -648,8 +644,8 @@ def to_display_df_processed_or_untouched(rows: List[Dict[str, Any]]) -> pd.DataF
         df["Date"] = df["Date"].apply(lambda x: x.strftime("%m-%d-%Y"))
     return df
 
-processed_df = to_display_df_processed_or_untouched(processed_rows)
-untouched_df = to_display_df_processed_or_untouched(untouched_rows)
+processed_df = to_display_df(processed_rows)
+untouched_df = to_display_df(untouched_rows)
 rejected_df = pd.DataFrame(rejected_rows, columns=["Event", "Reason"]) if rejected_rows else pd.DataFrame(columns=["Event", "Reason"])
 
 # Counts summary
@@ -688,10 +684,7 @@ st.download_button(
 )
 
 # ---------------------------
-# Publish subscription feed (S3)
-# ---------------------------
-# ---------------------------
-# Publish subscription feed (S3)
+# Publish subscription feed (S3) with token ownership
 # ---------------------------
 st.subheader("Publish Subscription Feed (S3)")
 
@@ -703,7 +696,7 @@ st.markdown(
     "and inadvertently overwriting the others' calendars."
 )
 
-# Show warning only after URL provided (and only URL mode)
+# Warning only after URL is provided (and only in URL mode)
 if input_mode == "Subscription URL" and url:
     st.warning(
         "Important: The subscription URL does NOT automatically update in the background. "
@@ -720,7 +713,6 @@ if valid_id:
     region = st.secrets["AWS_REGION"]
     key = f"feeds/{feed_id}.ics"
     sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-
     existing_token = get_existing_token(bucket, key)
 
     if existing_token:
@@ -735,10 +727,10 @@ if valid_id:
                 try:
                     upload_feed(bucket, key, output_ics_bytes, existing_token)
                     st.success("Feed successfully updated.")
+                    st.write("Subscription URL:")
                     st.code(sub_url)
                 except Exception as e:
                     st.error(f"Update failed: {e}")
-
     else:
         if st.button("Create Feed"):
             try:
@@ -751,3 +743,6 @@ if valid_id:
                 st.code(token)
             except Exception as e:
                 st.error(f"Creation failed: {e}")
+else:
+    if feed_id:
+        st.error("Invalid Feed ID. Use 3–40 characters: letters, numbers, underscore, or dash.")
