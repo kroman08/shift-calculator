@@ -459,10 +459,6 @@ else:
         cal_text = up.getvalue().decode("utf-8", errors="replace")
         st.caption("Loaded uploaded ICS file.")
 
-if not cal_text:
-    st.info("Provide an ICS subscription URL or upload an ICS file to begin.")
-    st.stop()
-
 # ---- Parse
 events, data_errors = expand_events(cal_text, window_start, window_end)
 
@@ -706,3 +702,6 @@ with col_restore:
 
                         except Exception as e:
                             st.error(f"Restore+republish failed: {e}")
+if not cal_text:
+    st.info("Provide an ICS subscription URL or upload an ICS file to begin.")
+    st.stop()
