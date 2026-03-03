@@ -174,7 +174,7 @@ def build_output_ics(processed, untouched, feed_id):
 
     # Last Updated marker
     marker = Event()
-    marker.add("summary", f"HMU Shifts — Last Updated: {now.strftime('%Y-%m-%d %H:%M')}")
+    marker.add("summary", f"HMU Shifts - Last Updated: {now.strftime('%Y-%m-%d %H:%M')}")
     marker.add("uid", f"hmushifts-last-updated@{feed_id}")
     marker.add("dtstamp", now)
     start_marker = datetime.combine(now.date(), time(0,1)).replace(tzinfo=APP_TZ)
@@ -207,16 +207,19 @@ if "source_url_input" not in st.session_state:
     st.session_state["source_url_input"] = ""
 if "input_mode" not in st.session_state:
     st.session_state["input_mode"] = "Subscription URL"
-if "feed_lookup_checked" not in st.session_state:
-    st.session_state["feed_lookup_checked"] = False
-if "feed_exists" not in st.session_state:
-    st.session_state["feed_exists"] = False
+if "lookup_checked" not in st.session_state:
+    st.session_state["lookup_checked"] = False
+if "calendar_exists" not in st.session_state:
+    st.session_state["calendar_exists"] = False
 if "stored_metadata" not in st.session_state:
     st.session_state["stored_metadata"] = {}
 if "restore_validated" not in st.session_state:
     st.session_state["restore_validated"] = False
 if "validated_token" not in st.session_state:
     st.session_state["validated_token"] = ""
+if "checked_calendar_name" not in st.session_state:
+    st.session_state["checked_calendar_name"] = ""
+
 
 def process_events(events, role):
     processed = []
@@ -233,6 +236,7 @@ def process_events(events, role):
             untouched.append(e)
 
     return processed, untouched
+
 
 def show_event_preview(processed, untouched, errors):
     st.markdown("### Event Preview")
@@ -273,37 +277,42 @@ def show_event_preview(processed, untouched, errors):
 
 
 today = date.today()
-default_end = date(today.year+1, 6, 30)
+default_end = date(today.year + 1, 6, 30)
 
-st.info("Returning user? If you already have a Feed ID, use the Feed ID lookup below to quickly load your saved source URL before publishing updates.")
+st.info("Returning user? If you already have a Calendar Name, you can proceed directly to the Your Calendar Name lookup below to update your feed.")
+st.caption("*Forgot Calendar Name? In your calendar app, open subscribed calendar info. URL shows .../feeds/yourCalendarName.ics*")
 
-lookup_feed_id = st.text_input("Feed ID", key="feed_id")
+lookup_calendar_name = st.text_input("Your Calendar Name", key="lookup_calendar_name")
 
 bucket = st.secrets["S3_BUCKET"]
 region = st.secrets["AWS_REGION"]
 
-if st.button("Check Feed ID"):
-    st.session_state["feed_lookup_checked"] = True
+if st.button("Check Calendar Name"):
+    st.session_state["lookup_checked"] = True
     st.session_state["restore_validated"] = False
     st.session_state["validated_token"] = ""
+    st.session_state["checked_calendar_name"] = lookup_calendar_name.strip()
 
-    if not lookup_feed_id:
-        st.session_state["feed_exists"] = False
-        st.error("Enter a Feed ID to look it up.")
+    if not lookup_calendar_name.strip():
+        st.session_state["calendar_exists"] = False
+        st.session_state["stored_metadata"] = {}
+        st.error("Enter Your Calendar Name to look it up.")
     else:
-        key = f"feeds/{lookup_feed_id}.ics"
+        key = f"feeds/{lookup_calendar_name.strip()}.ics"
         existing = head_feed(bucket, key)
         if not existing:
-            st.session_state["feed_exists"] = False
+            st.session_state["calendar_exists"] = False
             st.session_state["stored_metadata"] = {}
-            st.error("No Feed ID was found matching the value provided.")
+            st.error("No calendar was found matching the Calendar Name provided.")
         else:
-            st.session_state["feed_exists"] = True
+            st.session_state["calendar_exists"] = True
             st.session_state["stored_metadata"] = existing.get("Metadata", {})
-            st.success("Feed ID found. Confirm ownership token to load saved source URL.")
+            st.success("Calendar found. Confirm ownership token to restore source URL and update this feed.")
 
-if st.session_state["feed_lookup_checked"] and st.session_state["feed_exists"]:
+if st.session_state["lookup_checked"] and st.session_state["calendar_exists"]:
     restore_token = st.text_input("Ownership Token", type="password", key="restore_token")
+    st.caption("*Ownership token format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.*")
+
     if st.button("Validate Ownership Token"):
         stored_token = st.session_state["stored_metadata"].get("owner-token", "")
         if not restore_token:
@@ -318,7 +327,7 @@ if st.session_state["feed_lookup_checked"] and st.session_state["feed_exists"]:
 
             if not restored_url:
                 st.session_state["restore_validated"] = False
-                st.error("No source URL stored for this feed.")
+                st.error("No source URL stored for this calendar.")
             else:
                 st.session_state["restore_validated"] = True
                 st.session_state["validated_token"] = restore_token.strip().upper()
@@ -326,7 +335,7 @@ if st.session_state["feed_lookup_checked"] and st.session_state["feed_exists"]:
                 st.session_state["input_mode"] = "Subscription URL"
                 st.session_state["restored_role"] = restored_role
                 st.session_state["restored_end"] = restored_end
-                st.success("Ownership confirmed. Source URL restored. Review the preview below, then click Publish/Update Feed.")
+                st.success("Ownership confirmed. Source URL restored. Review parsed events, then click Update Existing Feed.")
 
 role_default = 0
 if st.session_state.get("restore_validated"):
@@ -359,7 +368,6 @@ else:
     if upload:
         cal_text = upload.read().decode("utf-8")
 
-parsed_events = []
 parse_errors = []
 processed = []
 untouched = []
@@ -370,36 +378,72 @@ if cal_text:
     show_event_preview(processed, untouched, parse_errors)
 
 # ============================================================
-# PUBLISH / UPDATE
+# FINAL ACTION
 # ============================================================
 
-st.subheader("Publish / Update Feed")
-st.caption("*Forgot Feed ID? In your calendar app, open subscribed calendar info. URL shows .../feeds/yourFeedID.ics*")
+if st.session_state.get("restore_validated"):
+    if st.button("Update Existing Feed"):
+        if not cal_text:
+            st.error("Provide a source calendar first.")
+        else:
+            calendar_name = st.session_state.get("checked_calendar_name", "").strip()
+            token = st.session_state.get("validated_token", "").strip().upper()
+            key = f"feeds/{calendar_name}.ics"
+            final_ics = build_output_ics(processed, untouched, calendar_name)
 
-publish_feed_id = st.text_input("Feed ID for publish/update", value=lookup_feed_id, key="publish_feed_id")
-default_publish_token = st.session_state.get("validated_token", "")
-publish_token = st.text_input("Ownership Token for publish/update", type="password", value=default_publish_token, key="publish_token")
+            put_feed(bucket, key, final_ics, {
+                "owner-token": token,
+                "source-url": url or "",
+                "role": role,
+                "window-end": str(window_end)
+            })
 
-if st.button("Publish / Update Feed"):
-    if not cal_text:
-        st.error("Provide a source calendar first.")
-    elif not publish_feed_id or not publish_token:
-        st.error("Feed ID and Ownership Token are required for publishing.")
+            sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
+            st.success("Feed updated successfully.")
+            st.code(sub_url)
+            st.warning(
+                "You can now subscribe to this calendar in your native calendar app. "
+                "Important: The subscription URL does NOT automatically update in the background. "
+                "If your source calendar changes, you must reopen this app and re-enter your Calendar Name, ownership token, and republish/update the feed. "
+                "Otherwise, the subscription calendar will remain unchanged. "
+                "Note: you can confirm the date of your last-update by searching your calendar for 'HMU Shifts - Last Updated'."
+            )
+else:
+    if st.session_state.get("lookup_checked") and st.session_state.get("calendar_exists"):
+        st.info("This Calendar Name already exists. Validate ownership token above to update it.")
     else:
-        key = f"feeds/{publish_feed_id}.ics"
-        final_ics = build_output_ics(processed, untouched, publish_feed_id)
-
-        put_feed(bucket, key, final_ics, {
-            "owner-token": publish_token.strip().upper(),
-            "source-url": url or "",
-            "role": role,
-            "window-end": str(window_end)
-        })
-
-        sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-
-        st.success("Feed published successfully.")
-        st.code(sub_url)
-        st.warning(
-            "Remember to click Publish / Update Feed after reviewing processed, untouched, and error events to push updates through."
+        st.subheader("Publish Feed")
+        publish_calendar_name = st.text_input("Your Calendar Name", value=lookup_calendar_name, key="publish_calendar_name")
+        st.caption(
+            "This ownership token will be required if you later republish/update the subscription URL associated with this calendar. "
+            "This is intended to prevent multiple people from using the same calendar name and inadvertently overwriting each other's calendars."
         )
+        st.caption("*Ownership token format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.*")
+        publish_token = st.text_input("Ownership Token", type="password", key="publish_token")
+
+        if st.button("Publish Feed"):
+            if not cal_text:
+                st.error("Provide a source calendar first.")
+            elif not publish_calendar_name.strip() or not publish_token.strip():
+                st.error("Your Calendar Name and Ownership Token are required for publishing.")
+            else:
+                key = f"feeds/{publish_calendar_name.strip()}.ics"
+                final_ics = build_output_ics(processed, untouched, publish_calendar_name.strip())
+
+                put_feed(bucket, key, final_ics, {
+                    "owner-token": publish_token.strip().upper(),
+                    "source-url": url or "",
+                    "role": role,
+                    "window-end": str(window_end)
+                })
+
+                sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
+                st.success("Feed published successfully.")
+                st.code(sub_url)
+                st.warning(
+                    "You can now subscribe to this calendar in your native calendar app. "
+                    "Important: The subscription URL does NOT automatically update in the background. "
+                    "If your source calendar changes, you must reopen this app and re-enter your Calendar Name, ownership token, and republish/update the feed. "
+                    "Otherwise, the subscription calendar will remain unchanged. "
+                    "Note: you can confirm the date of your last-update by searching your calendar for 'HMU Shifts - Last Updated'."
+                )
