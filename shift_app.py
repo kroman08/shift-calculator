@@ -310,8 +310,9 @@ if st.button("Check Calendar Name"):
             st.success("Calendar found. Confirm ownership token to restore source URL and update this feed.")
 
 if st.session_state["lookup_checked"] and st.session_state["calendar_exists"]:
-    restore_token = st.text_input("Ownership Token", type="password", key="restore_token")
-    st.caption("*Ownership token format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.*")
+    st.markdown("**Ownership Token:** *first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02*")
+    restore_token = st.text_input("Ownership Token", type="password", key="restore_token", label_visibility="collapsed")
+    st.caption("This token is required to prevent multiple people from using the same calendar name and inadvertently overwriting each other's calendars.")
 
     if st.button("Validate Ownership Token"):
         stored_token = st.session_state["stored_metadata"].get("owner-token", "")
@@ -414,12 +415,12 @@ else:
     else:
         st.subheader("Publish Feed")
         publish_calendar_name = st.text_input("Your Calendar Name", value=lookup_calendar_name, key="publish_calendar_name")
+        st.markdown("**Ownership Token:** *first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02*")
+        publish_token = st.text_input("Ownership Token", type="password", key="publish_token", label_visibility="collapsed")
         st.caption(
-            "This ownership token will be required if you later republish/update the subscription URL associated with this calendar. "
-            "This is intended to prevent multiple people from using the same calendar name and inadvertently overwriting each other's calendars."
+            "This token is required to prevent multiple people from using the same calendar name and inadvertently overwriting each other's calendars. "
+            "You will need this token if you later republish or update the subscription URL associated with this calendar."
         )
-        st.caption("*Ownership token format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.*")
-        publish_token = st.text_input("Ownership Token", type="password", key="publish_token")
 
         if st.button("Publish Feed"):
             if not cal_text:
