@@ -282,8 +282,7 @@ default_end = date(today.year + 1, 6, 30)
 st.info("Returning user? If you already have a Calendar Name, you can proceed directly to the Your Calendar Name lookup below to update your feed.")
 st.caption("*Forgot Calendar Name? In your calendar app, open subscribed calendar info. URL shows .../feeds/yourCalendarName.ics*")
 
-st.markdown("**Your Calendar Name:** *(alphanumeric and hyphens only; no spaces or special characters)*")
-lookup_calendar_name = st.text_input("Your Calendar Name", key="lookup_calendar_name", label_visibility="collapsed")
+lookup_calendar_name = st.text_input("Your Calendar Name", key="lookup_calendar_name")
 
 bucket = st.secrets["S3_BUCKET"]
 region = st.secrets["AWS_REGION"]
@@ -311,8 +310,7 @@ if st.button("Check Calendar Name"):
             st.success("Calendar found. Confirm ownership token to restore source URL and update this feed.")
 
 if st.session_state["lookup_checked"] and st.session_state["calendar_exists"]:
-    st.success("Calendar found. Confirm ownership token to restore source URL and update this feed.")
-    st.markdown("**Ownership Token:** *(first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02)*")
+    st.markdown("**Ownership Token:** *first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02*")
     restore_token = st.text_input("Ownership Token", type="password", key="restore_token", label_visibility="collapsed")
     st.caption("This token is required to prevent multiple people from using the same calendar name and inadvertently overwriting each other's calendars.")
 
@@ -412,9 +410,12 @@ if st.session_state.get("restore_validated"):
                 "Note: you can confirm the date of your last-update by searching your calendar for 'HMU Shifts - Last Updated'."
             )
 else:
-    if st.session_state.get("lookup_checked") and not st.session_state.get("calendar_exists"):
-        st.success("Calendar Name is available. Enter your Ownership Token to publish this feed.")
-        st.markdown("**Ownership Token:** *(first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02)*")
+    if st.session_state.get("lookup_checked") and st.session_state.get("calendar_exists"):
+        st.info("This Calendar Name already exists. Validate ownership token above to update it.")
+    else:
+        st.subheader("Publish Feed")
+        publish_calendar_name = st.text_input("Your Calendar Name", value=lookup_calendar_name, key="publish_calendar_name")
+        st.markdown("**Ownership Token:** *first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02*")
         publish_token = st.text_input("Ownership Token", type="password", key="publish_token", label_visibility="collapsed")
         st.caption(
             "This token is required to prevent multiple people from using the same calendar name and inadvertently overwriting each other's calendars. "
@@ -424,12 +425,11 @@ else:
         if st.button("Publish Feed"):
             if not cal_text:
                 st.error("Provide a source calendar first.")
-            elif not publish_token.strip():
-                st.error("Ownership Token is required for publishing.")
+            elif not publish_calendar_name.strip() or not publish_token.strip():
+                st.error("Your Calendar Name and Ownership Token are required for publishing.")
             else:
-                calendar_name = st.session_state.get("checked_calendar_name", "").strip()
-                key = f"feeds/{calendar_name}.ics"
-                final_ics = build_output_ics(processed, untouched, calendar_name)
+                key = f"feeds/{publish_calendar_name.strip()}.ics"
+                final_ics = build_output_ics(processed, untouched, publish_calendar_name.strip())
 
                 put_feed(bucket, key, final_ics, {
                     "owner-token": publish_token.strip().upper(),
