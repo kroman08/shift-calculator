@@ -1,8 +1,11 @@
+# ============================================================
+# HMU SHIFT PROCESSOR – CLEAN FINAL VERSION
+# ============================================================
+
 import re
-import secrets
 import hashlib
 from datetime import datetime, date, time, timedelta
-from typing import Optional, List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -15,16 +18,13 @@ from dateutil.rrule import rrulestr
 from streamlit_autorefresh import st_autorefresh
 from zoneinfo import ZoneInfo
 
-# =====================================================
-# TIMEZONE (DST-safe Eastern)
-# =====================================================
-APP_TZ = ZoneInfo("America/New_York")
+# ============================================================
+# CONFIG
+# ============================================================
 
-# =====================================================
-# SHIFT RULE CONFIG
-# =====================================================
+APP_TZ = ZoneInfo("America/New_York")
 ANCHOR_DATE = date(2025, 7, 1)
-ANCHOR_DAY_NUM = 2  # 7/1/2025 is Day 2
+ANCHOR_DAY_NUM = 2
 
 SPECIAL_BLUE_PERIODS = [
     (date(2025, 7, 7),  date(2025, 8, 3)),
@@ -33,455 +33,12 @@ SPECIAL_BLUE_PERIODS = [
     (date(2026, 4, 6),  date(2026, 5, 3)),
 ]
 
-# If MD is selected, these colors are always "Fixed"
 FIXED_MD_COLORS = {"yellow", "purple", "blue", "bronze", "green", "orange"}
 
-# Yellow, Purple, Blue (standard), Bronze, Orange share this suffix mapping
-YPBB_SUFFIX_ROTATION = {
-    "1-1": {1: "Early",  2: "Middle", 3: "Late",   4: "Middle"},
-    "1-2": {1: "Middle", 2: "Late",   3: "Middle", 4: "Early"},
-    "2-1": {1: "Late",   2: "Middle", 3: "Early",  4: "Middle"},
-    "2-2": {1: "Middle", 2: "Early",  3: "Middle", 4: "Late"},
-    "3":   {1: "Middle", 2: "Early",  3: "Middle", 4: "Late"},
-}
+# ============================================================
+# S3
+# ============================================================
 
-GREEN_SUFFIX_ROTATION = {
-    "1": {1: "Early",  2: "Middle", 3: "Late",   4: "Middle"},
-    "2": {1: "Middle", 2: "Late",   3: "Middle", 4: "Early"},
-    "3": {1: "Late",   2: "Middle", 3: "Early",  4: "Middle"},
-}
-
-MIST_SCU_ROTATION = {1: "Middle", 2: "Early", 3: "Middle", 4: "Late"}
-
-GRAY_MIST_EARLY_ON_1_3 = {"gray 1 md", "mist transplant"}
-GRAY_MIST_MIDDLE_ON_1_3 = {"gray 2 md", "gray 3 app"}
-ALL_GRAY_MIST_ROLES = GRAY_MIST_EARLY_ON_1_3.union(GRAY_MIST_MIDDLE_ON_1_3)
-
-# =====================================================
-# UI HELPERS
-# =====================================================
-def badge(text: str, color: str) -> None:
-    st.markdown(
-        f"""
-        <span style="
-            background-color:{color};
-            padding:4px 10px;
-            border-radius:12px;
-            font-size:12px;
-            font-weight:600;
-            color:white;">
-            {text}
-        </span>
-        """,
-        unsafe_allow_html=True,
-    )
-
-# =====================================================
-# NORMALIZATION & DAY NUMBER
-# =====================================================
-def normalize_title(s: Any) -> str:
-    """Remove trailing ($) etc. Keep only letters/numbers/spaces/hyphens; collapse spaces."""
-    if not isinstance(s, str):
-        return ""
-    s = re.sub(r"[^A-Za-z0-9\s\-]", "", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-def clean_input(text: Any) -> str:
-    if not isinstance(text, str):
-        return ""
-    text = text.strip().lower().replace(",", "")
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-def get_day_number(target_dt: date) -> int:
-    delta_days = (target_dt - ANCHOR_DATE).days
-    return (delta_days + ANCHOR_DAY_NUM - 1) % 4 + 1
-
-def is_in_special_blue_period(target_dt: date) -> bool:
-    for start_date, end_date in SPECIAL_BLUE_PERIODS:
-        if start_date <= target_dt <= end_date:
-            return True
-    return False
-
-# =====================================================
-# SHIFT CALCULATION
-# =====================================================
-def calc_shift_type(title: str, target_date: date, role: str) -> Optional[str]:
-    """
-    Returns: Early / Middle / Late / Fixed, or None (meaning leave untouched)
-    """
-    clean_shift = clean_input(normalize_title(title))
-    if not clean_shift:
-        return None
-
-    # Gray collaborator correction when MD selected
-    if role == "MD":
-        clean_shift = clean_shift.replace("gray 1 collaborator", "gray 1 md")
-        clean_shift = clean_shift.replace("gray 2 collaborator", "gray 2 md")
-
-    day_num = get_day_number(target_date)
-
-    # MD fixed override for certain colors
-    if role == "MD":
-        first = clean_shift.split(" ")[0] if clean_shift.split(" ") else ""
-        if first in FIXED_MD_COLORS:
-            return "Fixed"
-
-    # Gray/MIST transplant special roles
-    if clean_shift in ALL_GRAY_MIST_ROLES:
-        if clean_shift in GRAY_MIST_EARLY_ON_1_3:
-            return "Early" if day_num in (1, 3) else "Middle"
-        if clean_shift in GRAY_MIST_MIDDLE_ON_1_3:
-            return "Middle" if day_num in (1, 3) else "Early"
-        return None
-
-    # MIST SCU
-    if clean_shift.startswith("mist scu"):
-        return MIST_SCU_ROTATION.get(day_num)
-
-    parts = clean_shift.split()
-    shift_name = parts[0] if parts else ""
-    suffix = parts[1] if len(parts) > 1 else ""
-
-    # GOLD
-    if shift_name == "gold":
-        m = re.search(r"(\d+)", clean_shift)
-        if not m:
-            return None
-        num = int(m.group(1))
-        if num == 1:
-            return "Early"
-        if num >= 6:
-            return "Middle"
-        if num in (3, 5):
-            return "Early" if day_num in (1, 3) else "Middle"
-        if num in (2, 4):
-            return "Middle" if day_num in (1, 3) else "Early"
-        return None
-
-    # SILVER (assume 1 if missing)
-    if shift_name == "silver":
-        m = re.search(r"(\d+)", clean_shift)
-        num = int(m.group(1)) if m else 1
-        return "Early" if num == 1 else "Middle"
-
-    # BLUE (special periods vs standard)
-    if shift_name == "blue":
-        if not suffix:
-            return None
-        if is_in_special_blue_period(target_date):
-            if suffix == "1":
-                return "Early" if day_num in (1, 3) else "Middle"
-            if suffix in ("3-1", "3-2"):
-                return "Middle" if day_num in (1, 3) else "Early"
-            return None
-        else:
-            if suffix in YPBB_SUFFIX_ROTATION:
-                return YPBB_SUFFIX_ROTATION[suffix].get(day_num)
-            return None
-
-    # Yellow/Purple/Bronze/Orange
-    if shift_name in ("yellow", "purple", "bronze", "orange"):
-        if not suffix:
-            return None
-        if suffix in YPBB_SUFFIX_ROTATION:
-            return YPBB_SUFFIX_ROTATION[suffix].get(day_num)
-        return None
-
-    # Green
-    if shift_name == "green":
-        if not suffix:
-            return None
-        if suffix in GREEN_SUFFIX_ROTATION:
-            return GREEN_SUFFIX_ROTATION[suffix].get(day_num)
-        return None
-
-    # Unknown -> leave untouched
-    return None
-
-def shift_times(shift_type: str) -> Tuple[time, time]:
-    """
-    Early = 06:45–17:00
-    Middle = 08:00–17:00
-    Late = 08:00–18:45
-    Fixed = 08:00–17:00
-    """
-    if shift_type == "Early":
-        return time(6, 45), time(17, 0)
-    if shift_type == "Middle":
-        return time(8, 0), time(17, 0)
-    if shift_type == "Late":
-        return time(8, 0), time(18, 45)
-    if shift_type == "Fixed":
-        return time(8, 0), time(17, 0)
-    return time(8, 0), time(17, 0)
-
-# =====================================================
-# ICS INPUT: FETCH / READ
-# =====================================================
-@st.cache_data(ttl=3600)
-def fetch_ics_text(url: str) -> Tuple[str, str]:
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    return r.text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def _is_all_day(dt_val: Any) -> bool:
-    return isinstance(dt_val, date) and not isinstance(dt_val, datetime)
-
-def _as_eastern(dt: datetime) -> datetime:
-    """Convert aware datetime to Eastern; for naive, assume Eastern."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=APP_TZ)
-    return dt.astimezone(APP_TZ)
-
-def _clamp_same_day(start_dt: datetime, end_dt: datetime) -> datetime:
-    """
-    Ignore multi-day spans beyond start:
-    if end date differs, clamp to same start date using end's time-of-day.
-    If that becomes <= start, fallback to +1 hour.
-    """
-    if end_dt.date() != start_dt.date():
-        end_dt = datetime.combine(start_dt.date(), end_dt.timetz())
-        end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
-    if end_dt <= start_dt:
-        end_dt = start_dt + timedelta(hours=1)
-    return end_dt
-
-def _collect_exdates(comp) -> set:
-    ex = set()
-    exprop = comp.get("EXDATE")
-    if not exprop:
-        return ex
-    if not isinstance(exprop, list):
-        exprop = [exprop]
-    for item in exprop:
-        for dtv in getattr(item, "dts", []):
-            dt = getattr(dtv, "dt", None)
-            if isinstance(dt, datetime):
-                ex.add(_as_eastern(dt).date())
-            elif isinstance(dt, date):
-                ex.add(dt)
-    return ex
-
-def _collect_rdates(comp) -> set:
-    rd = set()
-    rdprop = comp.get("RDATE")
-    if not rdprop:
-        return rd
-    if not isinstance(rdprop, list):
-        rdprop = [rdprop]
-    for item in rdprop:
-        for dtv in getattr(item, "dts", []):
-            dt = getattr(dtv, "dt", None)
-            if isinstance(dt, datetime):
-                rd.add(_as_eastern(dt).date())
-            elif isinstance(dt, date):
-                rd.add(dt)
-    return rd
-
-def expand_events(cal_text: str, window_start: date, window_end: date) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str]]]:
-    """
-    Expand VEVENTs (including RRULE) into individual occurrences.
-    - Ignore multi-day spans beyond start (clamp end to same start day).
-    - Process recurring occurrences independently.
-    Returns (events, errors).
-    """
-    errors: List[Tuple[str, str]] = []
-    events: List[Dict[str, Any]] = []
-
-    cal = Calendar.from_ical(cal_text)
-
-    for comp in cal.walk():
-        if comp.name != "VEVENT":
-            continue
-
-        title = str(comp.get("SUMMARY", "")).strip() or "(no title)"
-        uid = str(comp.get("UID", "")).strip() or None
-
-        dtstart_prop = comp.get("DTSTART")
-        if not dtstart_prop:
-            errors.append((title, "Missing DTSTART"))
-            continue
-
-        dtstart_val = dtstart_prop.dt
-        dtend_val = comp.get("DTEND").dt if comp.get("DTEND") else None
-
-        # All-day
-        if _is_all_day(dtstart_val):
-            d = dtstart_val
-            if not (window_start <= d <= window_end):
-                continue
-            events.append({
-                "title": title,
-                "start_dt": d,     # date
-                "end_dt": None,
-                "all_day": True,
-                "uid": uid,
-            })
-            continue
-
-        # Timed
-        if not isinstance(dtstart_val, datetime):
-            errors.append((title, "Invalid DTSTART"))
-            continue
-
-        dtstart = _as_eastern(dtstart_val)
-
-        if isinstance(dtend_val, datetime):
-            dtend = _as_eastern(dtend_val)
-        else:
-            dtend = dtstart + timedelta(hours=1)
-
-        dtend = _clamp_same_day(dtstart, dtend)
-
-        exdates = _collect_exdates(comp)
-        rdates = _collect_rdates(comp)
-
-        rrule_prop = comp.get("RRULE")
-
-        # Recurring
-        if rrule_prop:
-            try:
-                rrule_str = rrule_prop.to_ical().decode("utf-8") if isinstance(rrule_prop.to_ical(), (bytes, bytearray)) else str(rrule_prop.to_ical())
-                rule = rrulestr(rrule_str, dtstart=dtstart)
-            except Exception:
-                errors.append((title, "Invalid RRULE"))
-                continue
-
-            duration = dtend - dtstart
-            ws = datetime.combine(window_start, time.min).replace(tzinfo=APP_TZ)
-            we = datetime.combine(window_end, time.max).replace(tzinfo=APP_TZ)
-
-            for occ in rule.between(ws, we, inc=True):
-                occ = _as_eastern(occ)
-                if occ.date() in exdates:
-                    continue
-                if not (window_start <= occ.date() <= window_end):
-                    continue
-
-                occ_end = occ + duration
-                occ_end = _clamp_same_day(occ, occ_end)
-
-                events.append({
-                    "title": title,
-                    "start_dt": occ,
-                    "end_dt": occ_end,
-                    "all_day": False,
-                    "uid": uid,
-                })
-
-            # Explicit RDATEs
-            for rd in rdates:
-                if not (window_start <= rd <= window_end):
-                    continue
-                if rd in exdates:
-                    continue
-                occ = datetime.combine(rd, dtstart.timetz()).replace(tzinfo=APP_TZ)
-                occ_end = occ + duration
-                occ_end = _clamp_same_day(occ, occ_end)
-                events.append({
-                    "title": title,
-                    "start_dt": occ,
-                    "end_dt": occ_end,
-                    "all_day": False,
-                    "uid": uid,
-                })
-
-        else:
-            # Non-recurring
-            d = dtstart.date()
-            if not (window_start <= d <= window_end):
-                continue
-            events.append({
-                "title": title,
-                "start_dt": dtstart,
-                "end_dt": dtend,
-                "all_day": False,
-                "uid": uid,
-            })
-
-    # De-dupe exact start/end/title
-    seen = set()
-    uniq = []
-    for e in events:
-        key = (e["title"], str(e["start_dt"]), str(e["end_dt"]), e["all_day"])
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(e)
-
-    return uniq, errors
-
-# =====================================================
-# OUTPUT ICS BUILD (Eastern) + Last Updated marker
-# =====================================================
-def stable_uid(feed_id: str, title: str, start_dt: Any) -> str:
-    raw = f"{feed_id}|{title}|{start_dt}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()[:20] + "@hmu-shifts"
-
-def build_output_ics(
-    processed_rows: List[Dict[str, Any]],
-    untouched_rows: List[Dict[str, Any]],
-    feed_id_for_uid: str
-) -> bytes:
-    cal = Calendar()
-    cal.add("prodid", "-//HMU Shift Processor//EN")
-    cal.add("version", "2.0")
-    cal.add("calscale", "GREGORIAN")
-    cal.add("X-WR-TIMEZONE", "America/New_York")
-
-    # ---- Last Updated marker: 1-minute transparent event @ 12:01 AM on publish day
-    updated_now = datetime.now(APP_TZ)
-
-    meta_event = Event()
-    meta_event.add("summary", f"HMU Shifts — Last Updated: {updated_now.strftime('%Y-%m-%d %H:%M')}")
-    meta_event.add("uid", f"hmushifts-last-updated@{feed_id_for_uid}")
-    meta_event.add("dtstamp", updated_now)
-
-    start_marker = datetime.combine(updated_now.date(), time(0, 1)).replace(tzinfo=APP_TZ)
-    end_marker = start_marker + timedelta(minutes=1)
-
-    meta_event.add("dtstart", start_marker)
-    meta_event.add("dtend", end_marker)
-    meta_event.add("transp", "TRANSPARENT")
-    meta_event.add("description", "System-generated update marker. Safe to ignore.")
-
-    cal.add_component(meta_event)
-    # ---- end marker
-
-    def add_row(row: Dict[str, Any]) -> None:
-        title = row["title"]
-        uid = row.get("uid") or stable_uid(feed_id_for_uid, title, row["start_dt"])
-
-        ev = Event()
-        ev.add("summary", title)
-        ev.add("uid", uid)
-        ev.add("dtstamp", datetime.now(APP_TZ))
-
-        if row["all_day"]:
-            ev.add("dtstart", row["start_dt"])  # date
-        else:
-            sd = row["start_dt"]
-            ed = row["end_dt"]
-            if isinstance(sd, datetime):
-                sd = _as_eastern(sd)
-            if isinstance(ed, datetime):
-                ed = _as_eastern(ed)
-            ev.add("dtstart", sd)
-            ev.add("dtend", ed)
-
-        cal.add_component(ev)
-
-    for r in processed_rows:
-        add_row(r)
-    for r in untouched_rows:
-        add_row(r)
-
-    return cal.to_ical()
-
-# =====================================================
-# S3 PUBLISH (token ownership)
-# =====================================================
 def s3_client():
     return boto3.client(
         "s3",
@@ -490,340 +47,359 @@ def s3_client():
         aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
     )
 
-def get_existing_token(bucket: str, key: str) -> Optional[str]:
+def head_feed(bucket: str, key: str):
     try:
-        resp = s3_client().head_object(Bucket=bucket, Key=key)
-        return resp.get("Metadata", {}).get("owner-token")
+        return s3_client().head_object(Bucket=bucket, Key=key)
     except ClientError:
         return None
 
+def put_feed(bucket: str, key: str, body: bytes, metadata: Dict[str, str]):
+    s3_client().put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType="text/calendar; charset=utf-8",
+        CacheControl="no-cache, max-age=0",
+        Metadata=metadata,
+    )
 
-def get_existing_metadata(bucket: str, key: str) -> Dict[str, str]:
-    """Return the metadata for an existing object, or empty dict."""
-    try:
-        resp = s3_client().head_object(Bucket=bucket, Key=key)
-        return resp.get("Metadata", {})
-    except ClientError:
-        return {}
+# ============================================================
+# SHIFT LOGIC
+# ============================================================
 
+def normalize_title(s: Any) -> str:
+    if not isinstance(s, str):
+        return ""
+    s = re.sub(r"[^A-Za-z0-9\s\-]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
 
-def upload_feed(
-    bucket: str,
-    key: str,
-    ics_bytes: bytes,
-    token: str,
-    metadata: Optional[Dict[str, str]] = None,
-) -> None:
-    """Upload an ICS payload to S3, recording the owner-token and any extra metadata.
+def get_day_number(d: date) -> int:
+    delta = (d - ANCHOR_DATE).days
+    return (delta + ANCHOR_DAY_NUM - 1) % 4 + 1
 
-    ``metadata`` may include fields such as ``source-url`` or ``role``.  The
-    owner-token will always be stored and will overwrite any existing value in
-    ``metadata``.
-    """
-    if metadata is None:
-        metadata = {}
-    # ensure the token is always present
-    metadata["owner-token"] = token
+def shift_times(shift_type: str) -> Tuple[time, time]:
+    if shift_type == "Early":
+        return time(6,45), time(17,0)
+    if shift_type == "Middle":
+        return time(8,0), time(17,0)
+    if shift_type == "Late":
+        return time(8,0), time(18,45)
+    if shift_type == "Fixed":
+        return time(8,0), time(17,0)
+    return time(8,0), time(17,0)
 
-    try:
-        s3_client().put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=ics_bytes,
-            ContentType="text/calendar; charset=utf-8",
-            CacheControl="no-cache, max-age=0",
-            Metadata=metadata,
-        )
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "UnknownError")
-        msg = e.response.get("Error", {}).get("Message", str(e))
-        st.error(f"S3 upload failed: {code}")
-        st.error(msg)
-        raise
+def calc_shift_type(title: str, d: date, role: str) -> Optional[str]:
+    t = normalize_title(title).lower()
+    day_num = get_day_number(d)
 
-def generate_token() -> str:
-    return secrets.token_hex(6).upper()
+    if role == "MD":
+        if any(t.startswith(color) for color in FIXED_MD_COLORS):
+            return "Fixed"
 
-# =====================================================
-# STREAMLIT APP UI
-# =====================================================
+    if t.startswith("gold"):
+        m = re.search(r"(\d+)", t)
+        if not m:
+            return None
+        n = int(m.group(1))
+        if n == 1:
+            return "Early"
+        if n >= 6:
+            return "Middle"
+        if n in (3,5):
+            return "Early" if day_num in (1,3) else "Middle"
+        if n in (2,4):
+            return "Middle" if day_num in (1,3) else "Early"
+
+    if t.startswith("silver"):
+        m = re.search(r"(\d+)", t)
+        if not m:
+            return "Early"
+        return "Early" if int(m.group(1)) == 1 else "Middle"
+
+    return None
+
+# ============================================================
+# ICS PARSING
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def fetch_ics(url: str) -> str:
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    return r.text
+
+def expand_events(cal_text: str, start_d: date, end_d: date):
+    cal = Calendar.from_ical(cal_text)
+    events = []
+    errors = []
+
+    for comp in cal.walk("VEVENT"):
+        summary = ""
+        try:
+            summary = str(comp.get("SUMMARY",""))
+            start = comp.decoded("DTSTART")
+            end = comp.decoded("DTEND")
+
+            if isinstance(start, datetime):
+                start = start.astimezone(APP_TZ)
+                end = end.astimezone(APP_TZ)
+
+                if start.date() < start_d or start.date() > end_d:
+                    continue
+
+                events.append({
+                    "title": summary,
+                    "start_dt": start,
+                    "end_dt": end,
+                    "all_day": False,
+                    "uid": str(comp.get("UID",""))
+                })
+
+        except Exception as e:
+            errors.append((summary, str(e)))
+
+    return events, errors
+
+# ============================================================
+# OUTPUT ICS
+# ============================================================
+
+def build_output_ics(processed, untouched, feed_id):
+    cal = Calendar()
+    cal.add("prodid", "-//HMU Shift Processor//EN")
+    cal.add("version", "2.0")
+    cal.add("X-WR-TIMEZONE", "America/New_York")
+
+    now = datetime.now(APP_TZ)
+
+    # Last Updated marker
+    marker = Event()
+    marker.add("summary", f"HMU Shifts — Last Updated: {now.strftime('%Y-%m-%d %H:%M')}")
+    marker.add("uid", f"hmushifts-last-updated@{feed_id}")
+    marker.add("dtstamp", now)
+    start_marker = datetime.combine(now.date(), time(0,1)).replace(tzinfo=APP_TZ)
+    marker.add("dtstart", start_marker)
+    marker.add("dtend", start_marker + timedelta(minutes=1))
+    marker.add("transp", "TRANSPARENT")
+    cal.add_component(marker)
+
+    for e in processed + untouched:
+        ev = Event()
+        ev.add("summary", e["title"])
+        ev.add("uid", e["uid"] or hashlib.sha256(e["title"].encode()).hexdigest())
+        ev.add("dtstamp", now)
+        ev.add("dtstart", e["start_dt"])
+        ev.add("dtend", e["end_dt"])
+        cal.add_component(ev)
+
+    return cal.to_ical()
+
+# ============================================================
+# STREAMLIT UI
+# ============================================================
+
 st.set_page_config(page_title="HMU Shift Processor", layout="centered")
 st.title("HMU Shift Processor")
 
-# Default role = MD
-role = st.selectbox("Role", ["MD", "APP"], index=0)
+st_autorefresh(interval=3600*1000, key="auto_refresh")
 
-# Auto-refresh hourly (only while app open)
-st_autorefresh(interval=3600 * 1000, key="auto_refresh_hourly")
+if "source_url_input" not in st.session_state:
+    st.session_state["source_url_input"] = ""
+if "input_mode" not in st.session_state:
+    st.session_state["input_mode"] = "Subscription URL"
+if "feed_lookup_checked" not in st.session_state:
+    st.session_state["feed_lookup_checked"] = False
+if "feed_exists" not in st.session_state:
+    st.session_state["feed_exists"] = False
+if "stored_metadata" not in st.session_state:
+    st.session_state["stored_metadata"] = {}
+if "restore_validated" not in st.session_state:
+    st.session_state["restore_validated"] = False
+if "validated_token" not in st.session_state:
+    st.session_state["validated_token"] = ""
 
-# ------------------------------------------------------------------
-# always-visible feed ID / ownership token section
-# ------------------------------------------------------------------
-st.subheader("Publish Subscription Feed (S3)")
+def process_events(events, role):
+    processed = []
+    untouched = []
 
-st.markdown(
-    "You can publish a subscription URL (paste into Outlook once). "
-    "A token is needed if you later republish/update the calendar subscription URL "
-    "associated with this Feed ID. "
-    "This is intended to prevent multiple people from using the same Feed ID "
-    "and inadvertently overwriting the others' calendars."
-)
+    for e in events:
+        shift = calc_shift_type(e["title"], e["start_dt"].date(), role)
+        if shift:
+            st_t, en_t = shift_times(shift)
+            new_start = datetime.combine(e["start_dt"].date(), st_t).replace(tzinfo=APP_TZ)
+            new_end = datetime.combine(e["start_dt"].date(), en_t).replace(tzinfo=APP_TZ)
+            processed.append({**e, "start_dt": new_start, "end_dt": new_end, "shift_type": shift})
+        else:
+            untouched.append(e)
 
-feed_id = st.text_input("Feed ID (3–40 letters/numbers/_/-)", key="feed_id")
-st.caption("*Forgot your Feed ID? Open your calendar app, find the subscribed calendar, go to info, and look in the URL: .../feeds/yourFeedID.ics*")
-token = st.text_input("Ownership Token (for updates)", type="password", key="token")
-st.caption("*Ownership token format: First initial + Middle initial + Last initial + Birth month (MM). Example: JMS01*")
+    return processed, untouched
 
-valid_id = bool(re.match(r"^[A-Za-z0-9_-]{3,40}$", feed_id or ""))
-existing_meta: Dict[str, str] = {}
-existing_token = None
-existing_url = None
-if valid_id:
-    bucket = st.secrets["S3_BUCKET"]
-    region = st.secrets["AWS_REGION"]
-    key = f"feeds/{feed_id}.ics"
-    existing_meta = get_existing_metadata(bucket, key)
-    existing_token = existing_meta.get("owner-token")
-    existing_url = existing_meta.get("source-url")
-    if existing_url:
-        st.caption(f"*Previously used subscription URL: {existing_url}*")
+def show_event_preview(processed, untouched, errors):
+    st.markdown("### Event Preview")
+    st.write(f"Processed events: **{len(processed)}**")
+    st.write(f"Untouched events: **{len(untouched)}**")
+    st.write(f"Parse errors: **{len(errors)}**")
 
-# choose input method after we may have an existing URL
-input_mode = st.radio("Input method", ["Subscription URL", "Upload ICS file"], horizontal=True)
+    if processed:
+        st.dataframe(pd.DataFrame([
+            {
+                "title": e["title"],
+                "date": e["start_dt"].date().isoformat(),
+                "start": e["start_dt"].strftime("%H:%M"),
+                "end": e["end_dt"].strftime("%H:%M"),
+                "shift_type": e.get("shift_type", "")
+            }
+            for e in processed
+        ]), use_container_width=True)
 
-# Default window: today -> June 30 next calendar year
+    if untouched:
+        with st.expander("Untouched events", expanded=False):
+            st.dataframe(pd.DataFrame([
+                {
+                    "title": e["title"],
+                    "date": e["start_dt"].date().isoformat(),
+                    "start": e["start_dt"].strftime("%H:%M"),
+                    "end": e["end_dt"].strftime("%H:%M")
+                }
+                for e in untouched
+            ]), use_container_width=True)
+
+    if errors:
+        with st.expander("Parse errors", expanded=False):
+            st.dataframe(pd.DataFrame({
+                "summary": [item[0] for item in errors],
+                "error": [item[1] for item in errors],
+            }), use_container_width=True)
+
+
 today = date.today()
-default_end = date(today.year + 1, 6, 30)
+default_end = date(today.year+1, 6, 30)
 
-st.subheader("Date window")
-window_start = st.date_input("Start date", value=today)
-window_end = st.date_input("End date", value=default_end)
-if window_end < window_start:
-    st.error("End date must be on/after start date.")
-    st.stop()
+st.info("Returning user? If you already have a Feed ID, use the Feed ID lookup below to quickly load your saved source URL before publishing updates.")
 
-cal_text: Optional[str] = None
-last_sync: Optional[str] = None
-url: Optional[str] = None
+lookup_feed_id = st.text_input("Feed ID", key="feed_id")
+
+bucket = st.secrets["S3_BUCKET"]
+region = st.secrets["AWS_REGION"]
+
+if st.button("Check Feed ID"):
+    st.session_state["feed_lookup_checked"] = True
+    st.session_state["restore_validated"] = False
+    st.session_state["validated_token"] = ""
+
+    if not lookup_feed_id:
+        st.session_state["feed_exists"] = False
+        st.error("Enter a Feed ID to look it up.")
+    else:
+        key = f"feeds/{lookup_feed_id}.ics"
+        existing = head_feed(bucket, key)
+        if not existing:
+            st.session_state["feed_exists"] = False
+            st.session_state["stored_metadata"] = {}
+            st.error("No Feed ID was found matching the value provided.")
+        else:
+            st.session_state["feed_exists"] = True
+            st.session_state["stored_metadata"] = existing.get("Metadata", {})
+            st.success("Feed ID found. Confirm ownership token to load saved source URL.")
+
+if st.session_state["feed_lookup_checked"] and st.session_state["feed_exists"]:
+    restore_token = st.text_input("Ownership Token", type="password", key="restore_token")
+    if st.button("Validate Ownership Token"):
+        stored_token = st.session_state["stored_metadata"].get("owner-token", "")
+        if not restore_token:
+            st.error("Ownership token is required.")
+        elif restore_token.strip().upper() != stored_token.upper():
+            st.session_state["restore_validated"] = False
+            st.error("Incorrect ownership token.")
+        else:
+            restored_url = st.session_state["stored_metadata"].get("source-url", "")
+            restored_role = st.session_state["stored_metadata"].get("role", "MD")
+            restored_end = st.session_state["stored_metadata"].get("window-end", str(default_end))
+
+            if not restored_url:
+                st.session_state["restore_validated"] = False
+                st.error("No source URL stored for this feed.")
+            else:
+                st.session_state["restore_validated"] = True
+                st.session_state["validated_token"] = restore_token.strip().upper()
+                st.session_state["source_url_input"] = restored_url
+                st.session_state["input_mode"] = "Subscription URL"
+                st.session_state["restored_role"] = restored_role
+                st.session_state["restored_end"] = restored_end
+                st.success("Ownership confirmed. Source URL restored. Review the preview below, then click Publish/Update Feed.")
+
+role_default = 0
+if st.session_state.get("restore_validated"):
+    role_default = 0 if st.session_state.get("restored_role", "MD") == "MD" else 1
+
+role = st.selectbox("Role", ["MD", "APP"], index=role_default)
+window_start = st.date_input("Start Date", value=today)
+window_end_value = default_end
+if st.session_state.get("restore_validated"):
+    try:
+        window_end_value = date.fromisoformat(st.session_state.get("restored_end", str(default_end)))
+    except ValueError:
+        window_end_value = default_end
+window_end = st.date_input("End Date", value=window_end_value)
+
+input_mode = st.radio("Input Method", ["Subscription URL", "Upload ICS"], key="input_mode")
+
+cal_text = None
+url = None
 
 if input_mode == "Subscription URL":
-    url = st.text_input("Paste ICS subscription URL (.ics)", value=(existing_url or ""))
-    colA, colB = st.columns([1, 1])
-    with colA:
-        sync_now = st.button("Sync Now", disabled=not bool(url))
-    with colB:
-        st.caption("Auto-refresh: every 1 hour (while open)")
-
-    if url and sync_now:
-        fetch_ics_text.clear()
-        st.rerun()
-
+    url = st.text_input("ICS Subscription URL", key="source_url_input")
     if url:
         try:
-            cal_text, last_sync = fetch_ics_text(url)
-            st.caption(f"Last sync: {last_sync}")
+            cal_text = fetch_ics(url)
         except Exception as e:
-            st.error(f"Failed to fetch calendar: {e}")
-            st.stop()
-
+            st.error(f"Unable to fetch calendar: {e}")
 else:
-    up = st.file_uploader("Upload an .ics file", type=["ics"])
-    if up is not None:
-        try:
-            cal_text = up.getvalue().decode("utf-8", errors="replace")
-            st.caption("Loaded uploaded ICS file.")
-        except Exception as e:
-            st.error(f"Failed to read uploaded file: {e}")
-            st.stop()
+    upload = st.file_uploader("Upload ICS file", type=["ics"])
+    if upload:
+        cal_text = upload.read().decode("utf-8")
 
-if not cal_text:
-    st.info("Provide an ICS subscription URL or upload an ICS file to begin.")
-    st.stop()
+parsed_events = []
+parse_errors = []
+processed = []
+untouched = []
 
-# Expand events
-events, data_errors = expand_events(cal_text, window_start, window_end)
+if cal_text:
+    parsed_events, parse_errors = expand_events(cal_text, window_start, window_end)
+    processed, untouched = process_events(parsed_events, role)
+    show_event_preview(processed, untouched, parse_errors)
 
-processed_rows: List[Dict[str, Any]] = []
-untouched_rows: List[Dict[str, Any]] = []
-rejected_rows: List[Tuple[str, str]] = list(data_errors)
+# ============================================================
+# PUBLISH / UPDATE
+# ============================================================
 
-for e in events:
-    title = e["title"]
+st.subheader("Publish / Update Feed")
+st.caption("*Forgot Feed ID? In your calendar app, open subscribed calendar info. URL shows .../feeds/yourFeedID.ics*")
 
-    if e["all_day"]:
-        untouched_rows.append(e)
-        continue
+publish_feed_id = st.text_input("Feed ID for publish/update", value=lookup_feed_id, key="publish_feed_id")
+default_publish_token = st.session_state.get("validated_token", "")
+publish_token = st.text_input("Ownership Token for publish/update", type="password", value=default_publish_token, key="publish_token")
 
-    sd: datetime = _as_eastern(e["start_dt"])
-    ed: datetime = _as_eastern(e["end_dt"])
-    ed = _clamp_same_day(sd, ed)
-
-    shift_type = calc_shift_type(title, sd.date(), role)
-
-    if shift_type:
-        st_t, en_t = shift_times(shift_type)
-        new_start = datetime.combine(sd.date(), st_t).replace(tzinfo=APP_TZ)
-        new_end = datetime.combine(sd.date(), en_t).replace(tzinfo=APP_TZ)
-        processed_rows.append({
-            "title": title,
-            "start_dt": new_start,
-            "end_dt": new_end,
-            "all_day": False,
-            "uid": e.get("uid"),
-        })
+if st.button("Publish / Update Feed"):
+    if not cal_text:
+        st.error("Provide a source calendar first.")
+    elif not publish_feed_id or not publish_token:
+        st.error("Feed ID and Ownership Token are required for publishing.")
     else:
-        untouched_rows.append({
-            "title": title,
-            "start_dt": sd,
-            "end_dt": ed,
-            "all_day": False,
-            "uid": e.get("uid"),
+        key = f"feeds/{publish_feed_id}.ics"
+        final_ics = build_output_ics(processed, untouched, publish_feed_id)
+
+        put_feed(bucket, key, final_ics, {
+            "owner-token": publish_token.strip().upper(),
+            "source-url": url or "",
+            "role": role,
+            "window-end": str(window_end)
         })
 
-# ---------------------------
-# Display (sorted, formatted MM-DD-YYYY)
-# ---------------------------
-def to_display_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    disp = []
-    for r in rows:
-        if r.get("all_day"):
-            d = r["start_dt"]
-            disp.append({"Event": r["title"], "Date": d, "Start": "(all-day)", "End": ""})
-        else:
-            sd = r["start_dt"]
-            ed = r["end_dt"]
-            disp.append({
-                "Event": r["title"],
-                "Date": sd.date(),
-                "Start": sd.strftime("%H:%M"),
-                "End": ed.strftime("%H:%M"),
-            })
-    df = pd.DataFrame(disp, columns=["Event", "Date", "Start", "End"])
-    if not df.empty:
-        df = df.sort_values(["Date", "Start", "Event"], kind="mergesort")
-        df["Date"] = df["Date"].apply(lambda x: x.strftime("%m-%d-%Y"))
-    return df
+        sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
 
-processed_df = to_display_df(processed_rows)
-untouched_df = to_display_df(untouched_rows)
-rejected_df = pd.DataFrame(rejected_rows, columns=["Event", "Reason"]) if rejected_rows else pd.DataFrame(columns=["Event", "Reason"])
-
-# Counts summary
-total_count = len(processed_rows) + len(untouched_rows) + len(rejected_rows)
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Events", total_count)
-c2.metric("Processed", len(processed_rows))
-c3.metric("Left Untouched", len(untouched_rows))
-c4.metric("Rejected (Errors)", len(rejected_rows))
-
-filter_option = st.selectbox("Filter View", ["Show All", "Processed Only", "Left Untouched Only", "Errors Only"])
-
-if filter_option in ("Show All", "Processed Only"):
-    badge("Processed", "#2E8B57")
-    st.dataframe(processed_df, use_container_width=True)
-
-if filter_option in ("Show All", "Left Untouched Only"):
-    badge("Left Untouched", "#F4A300")
-    st.dataframe(untouched_df, use_container_width=True)
-
-if filter_option in ("Show All", "Errors Only"):
-    badge("Data Errors", "#B22222")
-    st.dataframe(rejected_df, use_container_width=True)
-
-# ---------------------------
-# Output ICS download
-# ---------------------------
-output_ics_bytes = build_output_ics(processed_rows, untouched_rows, feed_id_for_uid="download")
-
-st.subheader("Download output")
-st.download_button(
-    "Download output as ICS",
-    data=output_ics_bytes,
-    file_name="hmu_output.ics",
-    mime="text/calendar",
-)
-
-# ---------------------------
-# Publish subscription feed (S3) with token ownership
-# ---------------------------
-
-# Warning only after URL is provided (and only in URL mode)
-if input_mode == "Subscription URL" and url:
-    st.warning(
-        "Important: The subscription URL does NOT automatically update in the background. "
-        "If your source calendar changes, you must reopen this app and click Sync Now "
-        "to re-parse and republish the updated feed. "
-        "Otherwise, the subscription calendar will remain unchanged."
-    )
-
-if valid_id:
-    bucket = st.secrets["S3_BUCKET"]
-    region = st.secrets["AWS_REGION"]
-    key = f"feeds/{feed_id}.ics"
-    sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-
-    if existing_url:
-        st.caption(f"*Previously used subscription URL: {existing_url}*")
-
-    if existing_token:
-        st.info("This Feed ID already exists.")
-        # token input is already visible above
-        if st.button("Update Feed"):
-            if not token:
-                st.error("You must enter your ownership token.")
-            elif token != existing_token:
-                st.error("Incorrect ownership token. Update failed.")
-            else:
-                try:
-                    if input_mode == "Subscription URL" and not url and existing_url:
-                        url = existing_url
-
-                    upload_feed(
-                        bucket,
-                        key,
-                        output_ics_bytes,
-                        existing_token,
-                        metadata={
-                            **({"source-url": url} if url else {}),
-                            "role": role,
-                            "window-end": str(window_end),
-                        },
-                    )
-                    st.success("Feed successfully updated.")
-                    st.write("Subscription URL:")
-                    st.code(sub_url)
-                    st.info(
-                        "**Reminder:** This is your existing subscription URL. "
-                        "Your subscribed calendar in your native calendar app will update automatically with the new feed data. "
-                        "No further action is needed if you're already subscribed to this URL."
-                    )
-                    st.caption(
-                        "*Tip: Search your calendar for 'Last Updated' to find the timestamp event and confirm when the feed was last synced.*"
-                    )
-                except Exception as e:
-                    st.error(f"Update failed: {e}")
-    else:
-        if st.button("Create Feed"):
-            if not token:
-                st.error("You must enter an ownership token.")
-            else:
-                try:
-                    upload_feed(
-                        bucket,
-                        key,
-                        output_ics_bytes,
-                        token,
-                        metadata={
-                            **({"source-url": url} if url else {}),
-                            "role": role,
-                            "window-end": str(window_end),
-                        },
-                    )
-                    st.success("Feed successfully created.")
-                    st.write("Subscription URL:")
-                    st.code(sub_url)
-                    st.success("Save your ownership token. You will need it to update this feed later.")
-                    st.code(token)
-                except Exception as e:
-                    st.error(f"Creation failed: {e}")
-            st.error("Invalid Feed ID. Use 3–40 characters: letters, numbers, underscore, or dash.")
+        st.success("Feed published successfully.")
+        st.code(sub_url)
+        st.warning(
+            "Remember to click Publish / Update Feed after reviewing processed, untouched, and error events to push updates through."
+        )
