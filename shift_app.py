@@ -283,6 +283,7 @@ st.info("Returning user? If you already have a Calendar Name, you can proceed di
 st.caption("*Forgot Calendar Name? In your calendar app, open subscribed calendar info. URL shows .../feeds/yourCalendarName.ics*")
 
 lookup_calendar_name = st.text_input("Your Calendar Name", key="lookup_calendar_name")
+st.caption("*(Use only letters, numbers, and hyphens. No spaces.)*")
 
 bucket = st.secrets["S3_BUCKET"]
 region = st.secrets["AWS_REGION"]
@@ -311,7 +312,7 @@ if st.button("Check Calendar Name"):
 
 if st.session_state["lookup_checked"] and st.session_state["calendar_exists"]:
     restore_token = st.text_input("Ownership Token", type="password", key="restore_token")
-    st.caption("*Ownership token format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.*")
+    st.caption("*(Format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.)*")
 
     if st.button("Validate Ownership Token"):
         stored_token = st.session_state["stored_metadata"].get("owner-token", "")
@@ -399,13 +400,12 @@ if st.session_state.get("restore_validated"):
             })
 
             sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-            st.success("Feed updated successfully.")
+            st.success("Feed updated successfully. You can now subscribe to this calendar in your native calendar app.")
             st.code(sub_url)
             st.warning(
-                "You can now subscribe to this calendar in your native calendar app. "
                 "Important: The subscription URL does NOT automatically update in the background. "
-                "If your source calendar changes, you must reopen this app and re-enter your Calendar Name, ownership token, and republish/update the feed. "
-                "Otherwise, the subscription calendar will remain unchanged. "
+                "If your source calendar changes, you must reopen this app and re-enter your Calendar Name, ownership token, and republish/update the feed.\n"
+                "Otherwise, the subscription calendar will remain unchanged.\n\n"
                 "Note: you can confirm the date of your last-update by searching your calendar for 'HMU Shifts - Last Updated'."
             )
 else:
@@ -414,11 +414,12 @@ else:
     else:
         st.subheader("Publish Feed")
         publish_calendar_name = st.text_input("Your Calendar Name", value=lookup_calendar_name, key="publish_calendar_name")
+        st.caption("*(Use only letters, numbers, and hyphens. No spaces.)*")
         st.caption(
             "This ownership token will be required if you later republish/update the subscription URL associated with this calendar. "
             "This is intended to prevent multiple people from using the same calendar name and inadvertently overwriting each other's calendars."
         )
-        st.caption("*Ownership token format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.*")
+        st.caption("*(Format: first initial + middle initial + last initial + birth month (MM). Example: John M Smith born in February = JMS02. Case-insensitive.)*")
         publish_token = st.text_input("Ownership Token", type="password", key="publish_token")
 
         if st.button("Publish Feed"):
@@ -438,12 +439,11 @@ else:
                 })
 
                 sub_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
-                st.success("Feed published successfully.")
+                st.success("Feed published successfully. You can now subscribe to this calendar in your native calendar app.")
                 st.code(sub_url)
                 st.warning(
-                    "You can now subscribe to this calendar in your native calendar app. "
                     "Important: The subscription URL does NOT automatically update in the background. "
-                    "If your source calendar changes, you must reopen this app and re-enter your Calendar Name, ownership token, and republish/update the feed. "
-                    "Otherwise, the subscription calendar will remain unchanged. "
+                    "If your source calendar changes, you must reopen this app and re-enter your Calendar Name, ownership token, and republish/update the feed.\n"
+                    "Otherwise, the subscription calendar will remain unchanged.\n\n"
                     "Note: you can confirm the date of your last-update by searching your calendar for 'HMU Shifts - Last Updated'."
                 )
